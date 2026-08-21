@@ -1,0 +1,354 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { ClaudeAdapter, toolBody, fullBody, categoryOf, subgroupOf } from '../src/vendor/claude.ts';
+import { CodexAdapter } from '../src/vendor/codex.ts';
+import { CursorAdapter, parseExportedChat, readCursorDb } from '../src/vendor/cursor.ts';
+import { SqliteDb } from '../src/vendor/sqlite.ts';
+import { detectFromText } from '../src/vendor/detect.ts';
+
+export function run(Adapter, records) {
+  const a = new Adapter('f1', 'test.jsonl', 0, 1, {});
+  let at = 0;
+  for (const r of records) {
+    const text = JSON.stringify(r);
+    a.push(r, at, at + Buffer.byteLength(text));
+    at += Buffer.byteLength(text) + 1;
+  }
+  return { session: a.finish(1), adapter: a };
+}
+
+const rec = (o) => ({ timestamp: '2026-01-01T10:00:00.000Z', sessionId: 's1', uuid: `u${Math.random()}`, ...o });
+
+/* ---------- claude ---------- */
+
+test('human prompts open segments; a tool_result folds into its call', () => {
+  const { session } = run(ClaudeAdapter, [
+    rec({ type: 'queue-operation', operation: 'enqueue' }),
+    rec({ type: 'user', origin: { kind: 'human' }, message: { role: 'user', content: [{ type: 'text', text: 'first ask' }] } }),
+    rec({
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        model: 'claude-opus-5',
+        id: 'm1',
+        content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'ls -la' } }],
+      },
+    }),
+    rec({
+      timestamp: '2026-01-01T10:00:02.000Z',
+      type: 'user',
+      toolUseResult: { stdout: 'a.txt\nb.txt', stderr: '', interrupted: false },
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'a.txt\nb.txt' }] },
+    }),
+    rec({ type: 'user', origin: { kind: 'human' }, message: { role: 'user', content: [{ type: 'text', text: 'second ask' }] } }),
+  ]);
+
+  assert.deepEqual(session.events.map((e) => e.kind), ['system', 'prompt', 'op', 'prompt']);
+  const tool = session.events[2];
+  assert.equal(tool.op.name, 'Bash');
+  assert.equal(tool.op.category, 'execute');
+  assert.equal(tool.op.subgroup, 'ls');
+  assert.equal(tool.op.status, 'ok');
+  assert.equal(tool.subtitle, 'ls -la');
+  assert.equal(tool.body, 'a.txt\nb.txt');
+  assert.equal(tool.durationMs, 2000);
+  assert.equal(tool.durationSource, 'derived');
+  assert.ok(tool.tokens.payloadOut > 0, 'the result should carry an estimated payload');
+
+  // preamble + two prompt segments
+  assert.equal(session.segments.length, 3);
+  assert.equal(session.segments[1].title, 'first ask');
+  assert.equal(session.segments[1].toolCount, 1);
+  assert.equal(session.events[2].seg, 1);
+  assert.equal(session.events[3].seg, 2);
+});
+
+test('tool results are never mistaken for prompts', () => {
+  const { session, adapter } = run(ClaudeAdapter, [
+    rec({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'nope', content: 'orphan' }] } }),
+  ]);
+  assert.equal(session.events.filter((e) => e.kind === 'prompt').length, 0);
+  assert.equal(adapter.b.quality.orphanResults, 1);
+});
+
+test('an unanswered call is unpaired, not successful', () => {
+  const { session } = run(ClaudeAdapter, [
+    rec({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'x', name: 'Bash', input: { command: 'sleep 100' } }] } }),
+  ]);
+  assert.equal(session.events[0].op.status, 'unpaired');
+  assert.equal(session.events[0].durationMs, undefined);
+});
+
+test('reasoning is kept but collapsed, and empty reasoning becomes a system note', () => {
+  const { session } = run(ClaudeAdapter, [
+    rec({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'hmm' }] } }),
+    rec({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'thinking', thinking: '' }] } }),
+  ]);
+  assert.equal(session.events[0].kind, 'reasoning');
+  assert.equal(session.events[0].collapsed, true);
+  assert.equal(session.events[1].kind, 'system');
+});
+
+test('bad timestamps and missing fields do not throw', () => {
+  const { session } = run(ClaudeAdapter, [
+    { type: 'assistant', message: { content: [{ type: 'text', text: 'hi' }] } },
+    { type: 'wat' },
+  ]);
+  assert.equal(session.events[0].ts, 0);
+  assert.equal(session.events[0].tsSource, 'missing');
+  assert.equal(session.events[1].kind, 'system');
+});
+
+test('usage is attached once per request and cache reads stay separate', () => {
+  const usage = { input_tokens: 10, cache_creation_input_tokens: 5, cache_read_input_tokens: 9000, output_tokens: 7 };
+  const { session } = run(ClaudeAdapter, [
+    rec({ type: 'assistant', message: { role: 'assistant', id: 'm1', content: [{ type: 'text', text: 'a' }], usage } }),
+    // the same message id arriving again must not be counted twice
+    rec({ type: 'assistant', message: { role: 'assistant', id: 'm1', content: [{ type: 'text', text: 'b' }], usage } }),
+  ]);
+  const reported = session.events.filter((e) => e.tokens.reported);
+  assert.equal(reported.length, 1);
+  assert.deepEqual(reported[0].tokens.reported, { input: 10, cacheWrite: 5, cacheRead: 9000, output: 7 });
+});
+
+test('parallel calls in one request are marked as sharing their timing', () => {
+  const { session } = run(ClaudeAdapter, [
+    rec({
+      type: 'assistant',
+      message: {
+        role: 'assistant',
+        id: 'm1',
+        content: [
+          { type: 'tool_use', id: 'a', name: 'Read', input: { file_path: '/x/a.ts' } },
+          { type: 'tool_use', id: 'b', name: 'Read', input: { file_path: '/x/b.ts' } },
+        ],
+      },
+    }),
+    rec({ timestamp: '2026-01-01T10:00:03.000Z', type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'a', content: 'x' }] } }),
+    rec({ timestamp: '2026-01-01T10:00:05.000Z', type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'b', content: 'y' }] } }),
+  ]);
+  const ops = session.events.filter((e) => e.kind === 'op');
+  assert.equal(ops.length, 2);
+  for (const o of ops) assert.equal(o.durationSource, 'shared');
+});
+
+test('subagent work is attributed to the call that spawned it', () => {
+  const { session } = run(ClaudeAdapter, [
+    rec({ type: 'assistant', message: { role: 'assistant', id: 'm1', content: [{ type: 'tool_use', id: 'task', name: 'Task', input: { subagent_type: 'Explore' } }] } }),
+    rec({ isSidechain: true, type: 'assistant', message: { role: 'assistant', id: 'm2', content: [{ type: 'tool_use', id: 'g', name: 'Grep', input: { pattern: 'x' } }] } }),
+  ]);
+  const [task, grep] = session.events;
+  assert.equal(task.op.category, 'agent');
+  assert.equal(grep.sidechain, 1);
+  assert.equal(grep.spawnedBy, task.idx);
+});
+
+test('plan mode wins over a todo list when both are present', () => {
+  const { session } = run(ClaudeAdapter, [
+    rec({ type: 'assistant', message: { role: 'assistant', id: 'm1', content: [{ type: 'tool_use', id: 'e', name: 'ExitPlanMode', input: { plan: '- one\n- two\n- three' } }] } }),
+    rec({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'e', content: 'User approved' }] } }),
+    rec({ type: 'assistant', message: { role: 'assistant', id: 'm2', content: [{ type: 'tool_use', id: 'td', name: 'TodoWrite', input: { todos: [{ content: 'one', status: 'pending' }] } }] } }),
+  ]);
+  const plans = session.events.filter((e) => e.plan);
+  assert.equal(plans[0].plan.source, 'plan-mode');
+  assert.equal(plans[0].plan.approved, true);
+  assert.equal(plans[0].plan.steps.length, 3);
+  assert.equal(plans[1].plan.source, 'plan-tool');
+});
+
+test('a rejected plan is not recorded as approved', () => {
+  const { session } = run(ClaudeAdapter, [
+    rec({ type: 'assistant', message: { role: 'assistant', id: 'm1', content: [{ type: 'tool_use', id: 'e', name: 'ExitPlanMode', input: { plan: '- one\n- two\n- three' } }] } }),
+    rec({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'e', content: 'The user rejected the plan.' }] } }),
+  ]);
+  assert.equal(session.events[0].plan.approved, false);
+});
+
+test('a plan written to a file counts as a plan', () => {
+  const { session } = run(ClaudeAdapter, [
+    rec({ type: 'assistant', message: { role: 'assistant', id: 'm1', content: [{ type: 'tool_use', id: 'w', name: 'Write', input: { file_path: '/repo/PLAN.md', content: '# Plan\n\n- a\n- b\n- c' } }] } }),
+    rec({ type: 'assistant', message: { role: 'assistant', id: 'm2', content: [{ type: 'tool_use', id: 'w2', name: 'Write', input: { file_path: '/repo/notes.md', content: '- a\n- b\n- c' } }] } }),
+  ]);
+  assert.equal(session.events[0].plan.source, 'file');
+  assert.equal(session.events[0].plan.path, '/repo/PLAN.md');
+  assert.equal(session.events[1].plan, undefined);
+});
+
+test('categories and drill-down keys', () => {
+  assert.equal(categoryOf('Read'), 'read');
+  assert.equal(categoryOf('Grep'), 'search');
+  assert.equal(categoryOf('MysteryTool'), 'other');
+  assert.equal(subgroupOf('Bash', 'execute', 'npm test -- --watch'), 'npm test');
+  assert.equal(subgroupOf('Edit', 'edit', '/repo/src/main.ts'), '.ts');
+  assert.equal(subgroupOf('WebFetch', 'web', 'https://www.docs.example.com/x'), 'docs.example.com');
+});
+
+/* ---------- tool bodies ---------- */
+
+test('Edit results render as a unified diff with counts', () => {
+  const b = toolBody('Edit', null, {
+    structuredPatch: [{ oldStart: 1, oldLines: 2, newStart: 1, newLines: 3, lines: [' keep', '-gone', '+new', '+extra'] }],
+  }, '');
+  assert.equal(b.format, 'diff');
+  assert.deepEqual(b.chips, ['+2', '−1']);
+  assert.equal(b.adds, 2);
+  assert.equal(b.dels, 1);
+});
+
+test('WebSearch results become a markdown link list', () => {
+  const b = toolBody('WebSearch', null, { query: 'q', durationSeconds: 2.05, results: [{ content: [{ title: 'T', url: 'https://x.dev' }] }] }, '');
+  assert.equal(b.format, 'md');
+  assert.equal(b.text, '- [T](https://x.dev)');
+  assert.deepEqual(b.chips, ['1 results', '2.0s']);
+});
+
+test('TodoWrite renders a checklist with progress', () => {
+  const b = toolBody('TodoWrite', null, { newTodos: [{ content: 'a', status: 'completed' }, { content: 'b', status: 'pending' }] }, '');
+  assert.equal(b.text, '[x] a\n[ ] b');
+  assert.deepEqual(b.chips, ['1/2 done']);
+});
+
+test('interrupted bash is reported as interrupted, not ok', () => {
+  assert.equal(toolBody('Bash', null, { stdout: '', stderr: '', interrupted: true }, '').status, 'interrupted');
+});
+
+test('fullBody rebuilds an over-sized body from the raw record', () => {
+  const big = 'x'.repeat(40_000);
+  const record = rec({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'short' }, { type: 'text', text: big }] } });
+  const { session } = run(ClaudeAdapter, [record]);
+  assert.equal(session.events[1].more, true);
+  assert.ok(session.events[1].body.length < big.length);
+  assert.equal(fullBody(record, { start: 0, end: 0, block: 1 }), big);
+});
+
+/* ---------- codex ---------- */
+
+const cx = (s, type, payload) => ({ timestamp: new Date(Date.parse('2026-02-01T10:00:00Z') + s * 1000).toISOString(), type, payload });
+
+test('codex rollouts produce prompts, calls and results', () => {
+  const { session } = run(CodexAdapter, [
+    cx(0, 'session_meta', { id: 'sess', cwd: '/repo', model: 'gpt-5' }),
+    cx(1, 'response_item', { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'do the thing' }] }),
+    cx(2, 'response_item', { type: 'reasoning', summary: [{ type: 'summary_text', text: 'thinking about it' }] }),
+    cx(3, 'response_item', { type: 'function_call', name: 'shell', call_id: 'c1', arguments: JSON.stringify({ command: ['bash', '-lc', 'npm test'] }) }),
+    cx(6, 'response_item', { type: 'function_call_output', call_id: 'c1', output: JSON.stringify({ output: 'ok', metadata: { exit_code: 0, duration_seconds: 2.5 } }) }),
+    cx(7, 'response_item', { type: 'function_call', name: 'update_plan', call_id: 'c2', arguments: JSON.stringify({ plan: [{ step: 'one', status: 'completed' }, { step: 'two', status: 'pending' }] }) }),
+    cx(8, 'response_item', { type: 'function_call_output', call_id: 'c2', output: 'updated' }),
+  ]);
+  const kinds = session.events.map((e) => e.kind);
+  assert.ok(kinds.includes('prompt'));
+  assert.ok(kinds.includes('reasoning'));
+  const shell = session.events.find((e) => e.op?.name === 'shell');
+  assert.equal(shell.op.category, 'execute');
+  assert.equal(shell.op.status, 'ok');
+  assert.equal(shell.op.exitCode, 0);
+  assert.equal(shell.durationMs, 2500);
+  assert.equal(shell.durationSource, 'reported');
+  assert.equal(session.info.cwd, '/repo');
+  const plan = session.events.find((e) => e.plan);
+  assert.equal(plan.plan.source, 'plan-tool');
+  assert.deepEqual(plan.plan.steps.map((s) => s.status), ['done', 'pending']);
+});
+
+test('codex cumulative token counters are differenced, and a reset is clamped', () => {
+  const { session, adapter } = run(CodexAdapter, [
+    cx(1, 'response_item', { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'one' }] }),
+    cx(2, 'event_msg', { type: 'token_count', info: { total_token_usage: { input_tokens: 1000, cached_input_tokens: 400, output_tokens: 100 } } }),
+    cx(3, 'response_item', { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'two' }] }),
+    cx(4, 'event_msg', { type: 'token_count', info: { total_token_usage: { input_tokens: 2500, cached_input_tokens: 900, output_tokens: 250 } } }),
+    // the context was reset: totals go backwards
+    cx(5, 'response_item', { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'three' }] }),
+    cx(6, 'event_msg', { type: 'token_count', info: { total_token_usage: { input_tokens: 300, cached_input_tokens: 0, output_tokens: 20 } } }),
+  ]);
+  const reported = session.events.filter((e) => e.tokens.reported).map((e) => e.tokens.reported);
+  assert.deepEqual(reported[0], { input: 600, cacheWrite: 0, cacheRead: 400, output: 100, reasoning: 0 });
+  assert.deepEqual(reported[1], { input: 1000, cacheWrite: 0, cacheRead: 500, output: 150, reasoning: 0 });
+  // The reset contributes nothing rather than a negative — the usage before it
+  // is unrecoverable, so the total is low rather than wrong, and says so.
+  assert.equal(reported.length, 2);
+  assert.ok(adapter.b.quality.notes.some((n) => /reset/.test(n)));
+});
+
+/* ---------- cursor ---------- */
+
+test('an exported cursor chat in markdown becomes a session', () => {
+  const chat = parseExportedChat('**User**\n\nfix the bug\n\n**Cursor**\n\nI changed src/x.ts\n');
+  assert.ok(chat);
+  assert.equal(chat.bubbles.length, 2);
+  assert.equal(chat.bubbles[0].role, 'user');
+  const adapter = new CursorAdapter('f', 'export.md', 0, 0.5, {});
+  const session = adapter.build(chat, [], [], 1);
+  assert.deepEqual(session.events.map((e) => e.kind), ['prompt', 'text']);
+  assert.ok(adapter.b.quality.notes.some((n) => /estimated/.test(n)));
+});
+
+test('the sqlite reader walks a real database', (t) => {
+  let dir;
+  try {
+    execFileSync('sqlite3', ['--version'], { stdio: 'ignore' });
+  } catch {
+    return t.skip('sqlite3 is not installed');
+  }
+  dir = mkdtempSync(join(tmpdir(), 'pr-sqlite-'));
+  const dbPath = join(dir, 'state.vscdb');
+  try {
+    const bubble = (id, type, text) =>
+      `INSERT INTO cursorDiskKV VALUES('bubbleId:c1:${id}', '${JSON.stringify({ type, text }).replace(/'/g, "''")}');`;
+    const composer = {
+      composerId: 'c1',
+      name: 'Refactor the parser',
+      createdAt: 1_700_000_000_000,
+      fullConversationHeadersOnly: [{ bubbleId: 'b1' }, { bubbleId: 'b2' }],
+    };
+    // a payload long enough to spill onto an overflow page
+    const long = 'x'.repeat(9000);
+    const sql = [
+      'CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value BLOB);',
+      'CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value BLOB);',
+      `INSERT INTO cursorDiskKV VALUES('composerData:c1', '${JSON.stringify(composer).replace(/'/g, "''")}');`,
+      bubble('b1', 1, 'please refactor ' + long),
+      bubble('b2', 2, 'done'),
+      '',
+    ].join('\n');
+    execFileSync('sqlite3', [dbPath], { input: sql });
+
+    const bytes = new Uint8Array(readFileSync(dbPath));
+    const db = new SqliteDb(bytes);
+    assert.deepEqual(db.tables.map((x) => x.name).sort(), ['ItemTable', 'cursorDiskKV']);
+
+    const { chats } = readCursorDb(bytes);
+    assert.equal(chats.length, 1);
+    assert.equal(chats[0].title, 'Refactor the parser');
+    assert.equal(chats[0].bubbles.length, 2);
+    assert.ok(chats[0].bubbles[0].text.endsWith(long), 'overflow pages must be reassembled');
+  } finally {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/* ---------- detection ---------- */
+
+test('vendors are told apart by content, never by extension', () => {
+  const claude = detectFromText(
+    JSON.stringify({ type: 'user', uuid: 'u1', sessionId: 's', message: { role: 'user', content: [{ type: 'text', text: 'hi' }] } }) + '\n',
+  );
+  assert.equal(claude.vendor, 'claude');
+
+  const codex = detectFromText(JSON.stringify({ timestamp: 't', type: 'response_item', payload: { type: 'message' } }) + '\n');
+  assert.equal(codex.vendor, 'codex');
+
+  const cursor = detectFromText(JSON.stringify({ composerId: 'c1', bubbles: [] }) + '\n');
+  assert.equal(cursor.vendor, 'cursor');
+
+  const sqlite = detectFromText('SQLite format 3\0rest of the file');
+  assert.equal(sqlite.vendor, 'cursor');
+
+  const nothing = detectFromText('just some prose\nwith no json in it\n');
+  assert.equal(nothing.vendor, 'unknown');
+  assert.ok(nothing.sample, 'an unrecognized file shows what it looked like');
+});

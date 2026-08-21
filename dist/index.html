@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Project Reader</title>
+    <link rel="icon" href="data:," />
+    <script type="module" crossorigin src="./assets/index.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index.css">
+  </head>
+  <body>
+    <div id="app" class="empty">
+      <aside id="side">
+        <div class="side-top">
+          <div class="brand">project&#8202;·&#8202;reader</div>
+          <div class="picks">
+            <label class="pick">
+              files<input id="file" type="file" accept=".jsonl,.json,.log,.md,.vscdb,.sqlite,.db" multiple hidden />
+            </label>
+            <button id="openfolder" class="pick" type="button">folder</button>
+            <input id="dir" type="file" webkitdirectory directory multiple hidden />
+          </div>
+        </div>
+        <div id="tree" class="tree"></div>
+        <div class="side-search">
+          <input id="q" type="search" placeholder="filter prompts  ·  ⏎ search all" autocomplete="off" spellcheck="false" />
+        </div>
+        <div id="types" class="types" role="group" aria-label="filter by type"></div>
+        <nav id="prompts" class="prompts" aria-label="prompts"></nav>
+        <div class="side-foot">
+          <label><input id="sys" type="checkbox" /> system events</label>
+          <button id="foldall" class="ghost" type="button">unfold all</button>
+        </div>
+        <div class="side-foot small">
+          <span id="cacheline">nothing cached yet</span>
+          <button id="clearcache" class="ghost" type="button">clear</button>
+        </div>
+        <div id="dirnote" class="side-note"></div>
+      </aside>
+
+      <main id="main">
+        <header id="top">
+          <div class="tinfo">
+            <h1 id="ttl">Drop a transcript, or open a folder</h1>
+            <div id="meta" class="meta"></div>
+            <div id="parts" class="parts" hidden></div>
+          </div>
+          <div id="prog" class="prog" hidden><i></i></div>
+          <button id="docktoggle" class="ghost" type="button" title="analytics (a)">analytics</button>
+        </header>
+        <div id="pin" class="pinbar" hidden></div>
+        <div class="pane">
+          <div id="scroller" class="scroller" tabindex="0">
+            <div id="content" class="content"></div>
+          </div>
+          <canvas id="gutter" class="gutter" aria-hidden="true"></canvas>
+        </div>
+      </main>
+
+      <aside id="dock" class="dock collapsed"></aside>
+    </div>
+
+    <div id="drop" class="drop">
+      <div class="drop-card">
+        <div class="drop-title">Drop a <b>session file</b> or a <b>folder</b> here</div>
+        <p>
+          Claude Code, Codex and Cursor transcripts. Everything is parsed in your browser — nothing is
+          uploaded, and only computed numbers are ever stored.
+        </p>
+        <div class="drop-actions">
+          <button id="browse" class="cta" type="button">choose files</button>
+          <button id="browsedir" class="cta ghosty" type="button">choose a folder</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast" hidden></div>
+    <div id="lightbox" class="lightbox" hidden><img alt="" /></div>
+
+  </body>
+</html>
