@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- three rows of a session, in the timeline's own colours: prompt, shell, edit -->
+  <rect width="32" height="32" rx="7" fill="#0f1115"/>
+  <rect x=".5" y=".5" width="31" height="31" rx="6.5" fill="none" stroke="#262c39"/>
+  <rect x="6.5" y="7" width="19" height="4" rx="2" fill="#6ea8fe"/>
+  <rect x="6.5" y="14" width="12" height="4" rx="2" fill="#57c08a"/>
+  <rect x="6.5" y="21" width="15.5" height="4" rx="2" fill="#e0b341"/>
+</svg>
