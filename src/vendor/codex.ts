@@ -7,7 +7,7 @@
  * shows up as a negative delta that must be clamped rather than believed.
  */
 
-import type { CanonSession, OpCategory, OpFacts, OpStatus, PlanArtifact } from '../model/canon.js';
+import type { CanonSession, ImageRef, OpCategory, OpFacts, OpStatus, PlanArtifact } from '../model/canon.js';
 import type { Calibration } from '../metrics/estimate.js';
 import { extractSteps } from '../metrics/steps.js';
 import { Builder, type EventSource } from './builder.js';
@@ -43,6 +43,9 @@ const CATEGORY: Record<string, OpCategory> = {
   ask_user: 'ask',
 };
 
+/** Separates a script from the output it produced, inside one result body. */
+const RULE = '─'.repeat(24) + ' output';
+
 export function categoryOf(name: string): OpCategory {
   if (CATEGORY[name]) return CATEGORY[name];
   if (/shell|exec|command/i.test(name)) return 'execute';
@@ -65,6 +68,76 @@ function parseArgs(v: unknown): any {
     }
   }
   return {};
+}
+
+/**
+ * Newer Codex rollouts have one tool — `exec` — whose input is a *program*:
+ * JavaScript that calls `tools.exec_command({cmd})`, `tools.apply_patch(...)`
+ * and friends. Printing that as JSON turns every shell command in the session
+ * into an unreadable blob, so the script is shown as code and the commands
+ * inside it are pulled out for the row head and the operations table.
+ */
+
+/** Read the JS string literal that starts at `at`, honouring escapes. */
+function readLiteral(src: string, at: number): { value: string; end: number } | null {
+  const quote = src[at];
+  if (quote !== '"' && quote !== "'" && quote !== '`') return null;
+  let out = '';
+  for (let i = at + 1; i < src.length; i++) {
+    const c = src[i];
+    if (c === '\\') {
+      const n = src[i + 1];
+      out += n === 'n' ? '\n' : n === 't' ? '\t' : n === 'r' ? '' : (n ?? '');
+      i++;
+      continue;
+    }
+    if (c === quote) return { value: out, end: i };
+    out += c;
+  }
+  return null;
+}
+
+/** Every shell command a script hands to `exec_command`. */
+export function scriptCommands(src: string): string[] {
+  const out: string[] = [];
+  const re = /\b(?:cmd|command)\s*:\s*/g;
+  while (re.exec(src)) {
+    const lit = readLiteral(src, re.lastIndex);
+    if (!lit) continue;
+    if (lit.value.trim()) out.push(lit.value.trim());
+    re.lastIndex = lit.end;
+  }
+  return out;
+}
+
+/** The `tools.*` functions a script calls, in the order it calls them. */
+export function scriptTools(src: string): string[] {
+  return [...src.matchAll(/\btools\.(\w+)\s*\(/g)].map((m) => m[1]);
+}
+
+/**
+ * The `*** Begin Patch` envelope a script hands to `apply_patch`, decoded.
+ *
+ * It travels as a JS string literal, so in the source every newline is a
+ * two-character `\n` and every backslash is doubled — which is precisely why
+ * the raw script is unreadable, and why the row shows the patch instead.
+ */
+export function patchText(src: string): string | undefined {
+  const at = src.indexOf('*** Begin Patch');
+  if (at === -1) return undefined;
+  for (let i = at; i >= 0; i--) {
+    const c = src[i];
+    if (c !== '"' && c !== "'" && c !== '`') continue;
+    const lit = readLiteral(src, i);
+    if (lit && lit.value.includes('*** Begin Patch')) return lit.value;
+    break;
+  }
+  return undefined;
+}
+
+/** The files an `apply_patch` envelope touches. */
+export function patchFiles(patch: string): string[] {
+  return [...patch.matchAll(/^\*\*\* (?:Update|Add|Delete) File:[ \t]*(.+)$/gm)].map((m) => m[1].trim());
 }
 
 /** The one-line head of a codex call, whatever shape its arguments took. */
@@ -111,7 +184,10 @@ function subgroupOf(category: OpCategory, target?: string): string | undefined {
 export function fullBody(rec: any, src: EventSource): string {
   const p = rec?.payload;
   if (!p) return asText(rec);
-  if (src.block === 1) return asText(p.output ?? p.result ?? p);
+  if (src.block === 1) {
+    const out = p.output ?? p.result;
+    return out == null ? asText(p) : stripScriptHeader(outputText(out)).text;
+  }
   if (typeof p.text === 'string') return p.text;
   if (Array.isArray(p.content)) {
     return p.content.map((c: any) => String(c?.text ?? '')).filter(Boolean).join('\n');
@@ -122,13 +198,16 @@ export function fullBody(rec: any, src: EventSource): string {
 export class CodexAdapter {
   readonly b: Builder;
   private pending = new Map<string, number>();
+  /** call id -> the script it ran, for calls the subtitle cannot represent */
+  private scripts = new Map<string, string>();
   private totals = { input: 0, cached: 0, output: 0, reasoning: 0 };
   private lastEventIdx = -1;
   private sawResponseItems = false;
+  private sawWallTime = false;
+  private sealedReasoning = 0;
 
   constructor(id: string, name: string, bytes: number, confidence: number, cal: Calibration = {}) {
     this.b = new Builder(id, name, bytes, 'codex', confidence, cal);
-    this.b.note('Codex: durations are derived from record timestamps; per-call timings are not reported.');
   }
 
   push(rec: any, start: number, end: number): void {
@@ -155,6 +234,10 @@ export class CodexAdapter {
         this.b.addSystem('token_count', '', ts, start, end);
         return;
       }
+      if (p.type === 'patch_apply_end' && p.changes && typeof p.changes === 'object') {
+        this.patch(p, ts, tsSource, start, end);
+        return;
+      }
       // Content also arrives as response_items; counting it twice would double
       // every token figure, so the event stream is kept as bookkeeping only.
       this.b.addSystem(String(p.type ?? 'event'), '', ts, start, end);
@@ -171,19 +254,26 @@ export class CodexAdapter {
     this.sawResponseItems = true;
     switch (p.type) {
       case 'message': {
-        const text = messageText(p);
-        if (!text.trim()) return;
+        const { text, images, files } = messageParts(p);
+        if (!text.trim() && !images.length) return;
         const human = p.role === 'user';
+        // `developer` is the IDE's own context, not something a human wrote:
+        // counting it as a prompt would split the session into phantom turns.
+        const dev = p.role === 'developer' || p.role === 'system';
         if (human) this.b.openSegment(text, ts);
         this.lastEventIdx = this.b.add(
           {
-            kind: human ? 'prompt' : 'text',
+            kind: dev ? 'system' : human ? 'prompt' : 'text',
             ts,
             tsSource,
-            title: human ? 'You' : 'Codex',
+            title: dev ? String(p.role) : human ? 'You' : 'Codex',
+            subtitle: dev ? oneLine(text, 120) : undefined,
             text,
             format: 'md',
             cls: 'prose',
+            images: images.length ? images : undefined,
+            chips: files.length ? files : undefined,
+            collapsed: dev || undefined,
             id: p.id,
           },
           { start, end, block: 0 },
@@ -192,7 +282,12 @@ export class CodexAdapter {
       }
       case 'reasoning': {
         const text = reasoningText(p);
-        if (!text.trim()) return;
+        if (!text.trim()) {
+          // Codex ships the reasoning encrypted; the summary array is empty.
+          // Saying so beats a session that looks like it never thought.
+          if (p.encrypted_content) this.sealedReasoning++;
+          return;
+        }
         this.lastEventIdx = this.b.add(
           {
             kind: 'reasoning',
@@ -280,18 +375,103 @@ export class CodexAdapter {
     }
   }
 
+  /**
+   * A path as the row should show it. Codex runs on Windows too, where the
+   * transcript mixes `\\` with `/` and disagrees with itself about the drive
+   * letter's case — so the prefix match is done on a normalized, case-folded
+   * copy while the displayed text keeps the separators the reader expects.
+   */
+  private rel(path: string): string {
+    const norm = path.replace(/\\/g, '/');
+    const cwd = this.b.info.cwd?.replace(/\\/g, '/');
+    if (cwd && norm.toLowerCase().startsWith(cwd.toLowerCase() + '/')) return norm.slice(cwd.length + 1);
+    return shortPath(norm);
+  }
+
+  /**
+   * `patch_apply_end` is the only record that says which files an edit touched
+   * and how. The call that applied it is a *script*, so without this the whole
+   * session reads as shell noise and every metric that counts edits — files
+   * touched, implementation end, unplanned work — sees nothing at all.
+   *
+   * The diff never entered the model's context (only the "Success…" summary
+   * did, on the call's own result), so these rows carry no token cost.
+   */
+  private patch(p: any, ts: number, tsSource: any, start: number, end: number): void {
+    const failed = p.success === false;
+    for (const [path, change] of Object.entries<any>(p.changes)) {
+      const diffText = String(change?.unified_diff ?? '');
+      const counts = countDiffLines(diffText);
+      const rel = this.rel(path);
+      const kind = String(change?.type ?? 'update');
+      const chips = [kind];
+      if (change?.move_path) chips.push(`→ ${this.rel(String(change.move_path))}`);
+      this.lastEventIdx = this.b.add(
+        {
+          kind: 'op',
+          ts,
+          tsSource,
+          title: 'apply_patch',
+          subtitle: rel,
+          text: diffText,
+          format: diffText ? 'diff' : 'text',
+          cls: 'code',
+          chips,
+          collapsed: true,
+          op: {
+            name: 'apply_patch',
+            category: 'edit',
+            target: rel,
+            subgroup: extname(rel) || basename(rel) || '(no extension)',
+            status: failed ? 'error' : 'ok',
+            linesAdded: counts.adds,
+            linesRemoved: counts.dels,
+          },
+          payloadIn: 0,
+        },
+        { start, end, block: 0, tool: 'apply_patch' },
+      );
+    }
+  }
+
   private openCall(p: any, ts: number, tsSource: any, start: number, end: number): void {
     const name = String(p.name ?? p.action?.type ?? 'call');
     const args = parseArgs(p.arguments ?? p.input ?? p.action);
     const category = categoryOf(name);
     if (!CATEGORY[name]) this.b.countUnknownTool(name);
-    const target = targetOf(args);
-    const text = asText(args);
+
+    // Arguments that would not parse as JSON are a script, not a mangled
+    // object: show the source, and lift the commands out of it.
+    const script = typeof args._raw === 'string' ? args._raw : undefined;
+    const cmds = script ? scriptCommands(script) : [];
+    const patch = script ? patchText(script) : undefined;
+    const patched = patch ? patchFiles(patch) : [];
+    const chips: string[] = [];
+    if (cmds.length > 1) chips.push(`${cmds.length} commands`);
+    if (patched.length) chips.push(patched.length === 1 ? '1 file' : `${patched.length} files`);
+
+    const text = script ?? asText(args);
+    const cls = script ? 'code' : 'json';
+    const target =
+      cmds.length ? cmds[0]
+      : patched.length ? this.rel(patched[0])
+      : targetOf(args);
+    const subtitle =
+      cmds.length === 1 ? firstLine(cmds[0], 160)
+      : cmds.length > 1 ? `${firstLine(cmds[0], 120)} (+${cmds.length - 1} more)`
+      : patched.length ? patched.map((f) => basename(this.rel(f))).join(', ')
+      : script ? firstLine(script, 160)
+      : callHead(args, this.b.info.cwd);
     const op: OpFacts = {
       name,
       category,
       target,
-      subgroup: subgroupOf(category, target),
+      // Group by the command that ran, not by the one tool every call uses:
+      // an ops table of 23 rows all called `exec` says nothing.
+      subgroup:
+        cmds.length ? commandHead(cmds[0])
+        : script ? (scriptTools(script)[0] ?? 'script')
+        : subgroupOf(category, target),
       status: 'unpaired',
     };
     const idx = this.b.add(
@@ -300,13 +480,14 @@ export class CodexAdapter {
         ts,
         tsSource,
         title: name,
-        subtitle: callHead(args, this.b.info.cwd),
+        subtitle,
         text,
         format: 'text',
-        cls: 'json',
+        cls,
+        chips: chips.length ? chips : undefined,
         collapsed: true,
         op,
-        payloadIn: this.b.est(text, 'json'),
+        payloadIn: this.b.est(text, cls),
         id: p.call_id ?? p.id,
       },
       { start, end, block: 0, tool: name },
@@ -316,17 +497,40 @@ export class CodexAdapter {
     const plan = planOf(name, args);
     if (plan) this.b.events[idx].plan = plan;
     const callId = p.call_id ?? p.id;
-    if (callId) this.pending.set(String(callId), idx);
+    if (callId) {
+      this.pending.set(String(callId), idx);
+      // Most scripts are a wrapper around one shell command, and the row head
+      // already shows it — repeating the boilerplate above every output would
+      // be the noise this is meant to remove. A real program is different: the
+      // result body is the only place left to show what actually ran.
+      const wrapper = cmds.length === 1 && scriptTools(script ?? '').length <= 1;
+      // For a patch, the envelope is the readable half of the script.
+      if (patch) this.scripts.set(String(callId), patch);
+      else if (script && !wrapper) this.scripts.set(String(callId), script);
+    }
   }
 
   private closeCall(p: any, ts: number, start: number, end: number): void {
     const callId = String(p.call_id ?? p.id ?? '');
     const idx = this.pending.get(callId);
     const out = p.output ?? p.result;
-    let text = typeof out === 'string' ? out : asText(out);
+    let text = outputText(out);
+    const context = text;
+    const chips: string[] = [];
     let exitCode: number | undefined;
     let status: OpStatus = 'ok';
     let durationMs: number | undefined;
+
+    const parsed = stripScriptHeader(text);
+    text = parsed.text;
+    if (parsed.failed) status = 'error';
+    if (parsed.wallMs !== undefined) {
+      durationMs = parsed.wallMs;
+      this.sawWallTime = true;
+    }
+    if (parsed.truncatedTokens !== undefined) {
+      chips.push(`truncated · ~${Math.round(parsed.truncatedTokens / 1000)}k tokens`);
+    }
 
     // The output is often itself a JSON envelope with the metadata attached.
     if (typeof out === 'string' && out.startsWith('{')) {
@@ -360,18 +564,33 @@ export class CodexAdapter {
     const ev = this.b.events[idx];
     const isPatch = ev.op?.category === 'edit';
     const diff = isPatch ? countDiffLines(text) : undefined;
+    if (!text.trim()) chips.push('no output');
+
+    // Show the program above what it printed, the way a terminal would. The
+    // cost is still charged separately: the script was paid for on the way in.
+    const script = this.scripts.get(callId);
+    this.scripts.delete(callId);
+    const body = script ? `${script.replace(/\s+$/, '')}\n${RULE}\n${text}` : text;
+    // A patch envelope reads as a diff, and the summary printed under it is
+    // plain enough to sit in the same block.
+    const patchBody = script?.startsWith('*** Begin Patch') === true;
     this.b.close(
       idx,
       {
-        text,
-        format: isPatch && /^[-+@]/m.test(text) ? 'diff' : 'text',
-        cls: isPatch ? 'code' : 'terminal',
+        text: body,
+        format: patchBody || (isPatch && /^[-+@]/m.test(text)) ? 'diff' : 'text',
+        cls: isPatch || patchBody ? 'code' : 'terminal',
+        chips: [...(ev.chips ?? []), ...chips],
         status,
         exitCode,
         linesAdded: diff?.adds,
         linesRemoved: diff?.dels,
         ts,
         durationMs,
+        // The header and the truncation warning were in the context even though
+        // the row drops them, and the script was charged on the way in — so the
+        // result's cost is measured from the result, not from what is displayed.
+        payloadOut: context === body ? undefined : this.b.est(context, 'terminal'),
       },
       { start, end, block: 1 },
     );
@@ -379,6 +598,17 @@ export class CodexAdapter {
   }
 
   finish(parseMs: number): CanonSession {
+    this.b.note(
+      this.sawWallTime ?
+        'Codex: script calls report their own wall time; every other duration is derived from record timestamps.'
+      : 'Codex: durations are derived from record timestamps; per-call timings are not reported.',
+    );
+    if (this.sealedReasoning) {
+      this.b.note(
+        `Codex: ${this.sealedReasoning} reasoning turns are stored encrypted and carry no readable text; ` +
+          'their tokens are still counted in the reported usage.',
+      );
+    }
     if (!this.sawResponseItems && this.b.events.length) {
       this.b.note('Codex: this rollout carries only event messages; content could not be reconstructed.');
     }
@@ -394,16 +624,89 @@ function num(v: unknown): number {
   return typeof v === 'number' && Number.isFinite(v) ? v : 0;
 }
 
-function messageText(p: any): string {
-  if (typeof p.text === 'string') return p.text;
-  if (typeof p.content === 'string') return p.content;
-  if (Array.isArray(p.content)) {
-    return p.content
-      .map((c: any) => (typeof c === 'string' ? c : String(c?.text ?? '')))
-      .filter(Boolean)
-      .join('\n');
+/**
+ * A message's parts: prose, the images the worker already decoded, and the
+ * `<image name=… path=…>` wrapper Codex writes around each one. The wrapper is
+ * markup, not something the human typed, so it leaves the body and comes back
+ * as a chip naming the file that was dropped in.
+ */
+function messageParts(p: any): { text: string; images: ImageRef[]; files: string[] } {
+  const images: ImageRef[] = [];
+  const files: string[] = [];
+  if (typeof p.text === 'string') return { text: p.text, images, files };
+  if (typeof p.content === 'string') return { text: p.content, images, files };
+  if (!Array.isArray(p.content)) return { text: '', images, files };
+
+  const lines: string[] = [];
+  for (const c of p.content) {
+    if (typeof c === 'string') {
+      lines.push(c);
+      continue;
+    }
+    if (c?.__img) {
+      images.push(c.__img as ImageRef);
+      continue;
+    }
+    const text = String(c?.text ?? '');
+    if (!text) continue;
+    const open = /^\s*<image\b[^>]*>\s*$/i.exec(text);
+    if (open) {
+      const path = /path="([^"]*)"/i.exec(text)?.[1];
+      if (path) files.push(basename(path.replace(/\\/g, '/')));
+      continue;
+    }
+    if (/^\s*<\/image>\s*$/i.test(text)) continue;
+    lines.push(text);
   }
-  return '';
+  return { text: lines.join('\n'), images, files };
+}
+
+function messageText(p: any): string {
+  return messageParts(p).text;
+}
+
+/**
+ * `Script completed / Wall time 1.0 seconds / Output:` is the header Codex
+ * wraps around every script result, sometimes followed by its own truncation
+ * warning. It carries a real per-call duration — the one thing this adapter
+ * otherwise has to infer from record stamps — so it is read, then removed from
+ * the body it was describing.
+ */
+function stripScriptHeader(raw: string): {
+  text: string;
+  failed?: boolean;
+  wallMs?: number;
+  truncatedTokens?: number;
+} {
+  let text = raw;
+  let failed: boolean | undefined;
+  let wallMs: number | undefined;
+  let truncatedTokens: number | undefined;
+  const head = /^Script (completed|failed)[^\n]*\n(?:Wall time ([\d.]+) seconds?\n)?(?:Output:[ \t]*\n?)?/.exec(text);
+  if (head) {
+    if (head[1] === 'failed') failed = true;
+    if (head[2]) wallMs = Math.round(Number(head[2]) * 1000);
+    text = text.slice(head[0].length);
+  }
+  const trunc = /^Warning: truncated output \(original token count: (\d+)\)[^\n]*\n?/.exec(text);
+  if (trunc) {
+    truncatedTokens = Number(trunc[1]);
+    text = text.slice(trunc[0].length);
+  }
+  return { text, failed, wallMs, truncatedTokens };
+}
+
+/** A result body, whether Codex sent a string, an envelope, or content parts. */
+function outputText(out: unknown): string {
+  if (out == null) return '';
+  if (typeof out === 'string') return out;
+  if (Array.isArray(out)) {
+    return out
+      .map((x) => (typeof x === 'string' ? x : String((x as any)?.text ?? '')))
+      .filter(Boolean)
+      .join('');
+  }
+  return asText(out);
 }
 
 function reasoningText(p: any): string {

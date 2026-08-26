@@ -41,14 +41,27 @@ async function toRef(data: string, mime: string): Promise<ImageRef | null> {
   }
 }
 
+const DATA_URL = /^data:([^;,]+)?(;base64)?,(.*)$/s;
+
 /**
  * Walk a record's content blocks, converting every base64 image in place and
  * dropping the base64 string so it can be collected immediately.
  * Returns the number of images converted.
+ *
+ * The *decoding* is shared; the *walking* is not, because each vendor buries
+ * its images somewhere else. Claude nests them inside tool-result blocks;
+ * Codex puts them straight in a message's content as data: URLs.
  */
 export async function extractImages(rec: any): Promise<number> {
-  const content = rec?.message?.content;
-  if (!Array.isArray(content)) return 0;
+  const claude = rec?.message?.content;
+  if (Array.isArray(claude)) return fromClaude(claude);
+  const payload = rec?.payload;
+  if (Array.isArray(payload?.content)) return fromCodex(payload.content);
+  if (Array.isArray(payload?.output)) return fromCodex(payload.output);
+  return 0;
+}
+
+async function fromClaude(content: any[]): Promise<number> {
   let n = 0;
   for (const block of content) {
     const inner = block?.content;
@@ -67,6 +80,29 @@ export async function extractImages(rec: any): Promise<number> {
         part.__img = { url: src.url, w: 0, h: 0, bytes: 0 } satisfies ImageRef;
         n++;
       }
+    }
+  }
+  return n;
+}
+
+async function fromCodex(content: any[]): Promise<number> {
+  let n = 0;
+  for (const part of content) {
+    if (!part || typeof part !== 'object') continue;
+    if (!/image/.test(String(part.type ?? ''))) continue;
+    const url = part.image_url ?? part.url;
+    if (typeof url !== 'string' || !url) continue;
+    const m = DATA_URL.exec(url);
+    if (m && m[2]) {
+      const ref = await toRef(m[3], m[1] ?? 'image/png');
+      part.image_url = ''; // release the big string right away
+      if (ref) {
+        part.__img = ref;
+        n++;
+      }
+    } else if (!m) {
+      part.__img = { url, w: 0, h: 0, bytes: 0 } satisfies ImageRef;
+      n++;
     }
   }
   return n;

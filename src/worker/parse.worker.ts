@@ -117,7 +117,8 @@ async function build(
       continue;
     }
     // Only pay for the async image walk on records that actually carry one.
-    if (line.text.length > 1024 && line.text.includes('"base64"')) {
+    // Claude writes `"type":"base64"`, Codex a `data:image/…;base64,` URL.
+    if (line.text.length > 1024 && line.text.includes('base64')) {
       await extractImages(rec);
     }
     adapter.push(rec, line.start, line.end);

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { ClaudeAdapter, toolBody, fullBody, categoryOf, subgroupOf } from '../src/vendor/claude.ts';
-import { CodexAdapter } from '../src/vendor/codex.ts';
+import { CodexAdapter, fullBody as codexFullBody, scriptCommands } from '../src/vendor/codex.ts';
 import { CursorAdapter, parseExportedChat, readCursorDb } from '../src/vendor/cursor.ts';
 import { SqliteDb } from '../src/vendor/sqlite.ts';
 import { detectFromText } from '../src/vendor/detect.ts';
@@ -272,6 +272,115 @@ test('codex cumulative token counters are differenced, and a reset is clamped', 
   // is unrecoverable, so the total is low rather than wrong, and says so.
   assert.equal(reported.length, 2);
   assert.ok(adapter.b.quality.notes.some((n) => /reset/.test(n)));
+});
+
+test('a codex exec script is shown as code, and the commands inside it are lifted out', () => {
+  const script =
+    'const r = await tools.exec_command({cmd:"rg -n \\"Tip|Top\\" src --glob \'!vendor/**\'"});\ntext(r.output);\n';
+  const { session } = run(CodexAdapter, [
+    cx(0, 'session_meta', { id: 's', cwd: 'e:\\work\\repo' }),
+    cx(1, 'response_item', { type: 'custom_tool_call', name: 'exec', call_id: 'c1', input: script }),
+    cx(4, 'response_item', {
+      type: 'custom_tool_call_output',
+      call_id: 'c1',
+      output: [
+        { type: 'input_text', text: 'Script completed\nWall time 1.4 seconds\nOutput:\n' },
+        { type: 'input_text', text: 'src/a.ts:12: TipTop\n' },
+      ],
+    }),
+  ]);
+  const call = session.events.find((e) => e.op?.name === 'exec');
+  // The row leads with the command, not with `{"_raw":"const r = await…`.
+  assert.equal(call.subtitle, 'rg -n "Tip|Top" src --glob \'!vendor/**\'');
+  // The script is a plain wrapper around one command that the head already
+  // shows, so the body is just the output.
+  assert.equal(call.body, 'src/a.ts:12: TipTop\n');
+  assert.equal(call.op.subgroup, 'rg', 'the ops table groups by command, not by the one tool');
+  assert.equal(call.op.category, 'execute');
+  // The wall time is reported by the tool, not inferred from record stamps.
+  assert.equal(call.durationMs, 1400);
+  assert.equal(call.durationSource, 'reported');
+  assert.equal(call.body.includes('Script completed'), false);
+  assert.equal(call.op.status, 'ok');
+});
+
+test('a script with no shell command still groups, and a failed one is an error', () => {
+  const { session } = run(CodexAdapter, [
+    cx(1, 'response_item', { type: 'custom_tool_call', name: 'exec', call_id: 'c1', input: 'text(ALL_TOOLS.map(x=>x.name));\n' }),
+    cx(2, 'response_item', {
+      type: 'custom_tool_call_output',
+      call_id: 'c1',
+      output: [{ type: 'input_text', text: 'Script failed\nWall time 0.2 seconds\nOutput:\n' }, { type: 'input_text', text: 'boom' }],
+    }),
+  ]);
+  const call = session.events.find((e) => e.op?.name === 'exec');
+  assert.equal(call.op.subgroup, 'script');
+  assert.equal(call.op.status, 'error');
+  // Nothing in the head can stand for a program, so it is shown above what it
+  // printed, the way a terminal would.
+  assert.ok(call.body.startsWith('text(ALL_TOOLS.map(x=>x.name));'), call.body);
+  assert.ok(call.body.endsWith('boom'));
+  assert.ok(/─+ output/.test(call.body));
+});
+
+test('a truncated codex result is flagged, and still costed at what the model was sent', () => {
+  const full = 'Script completed\nWall time 0.5 seconds\nOutput:\nWarning: truncated output (original token count: 27376)\nthe rest\n';
+  const { session } = run(CodexAdapter, [
+    cx(1, 'response_item', { type: 'custom_tool_call', name: 'exec', call_id: 'c1', input: 'tools.exec_command({cmd:"ls"})' }),
+    cx(2, 'response_item', { type: 'custom_tool_call_output', call_id: 'c1', output: [{ type: 'input_text', text: full }] }),
+  ]);
+  const call = session.events.find((e) => e.op?.name === 'exec');
+  assert.equal(call.body, 'the rest\n');
+  assert.ok(call.chips.some((c) => /truncated/.test(c)));
+  // The warning and the header were in the context even though the row drops
+  // them, so the estimate must not shrink with the display.
+  assert.ok(call.tokens.payloadOut > Math.round('the rest\n'.length / 4));
+});
+
+test('codex patch events become per-file edits with real diffs', () => {
+  const diff = '@@ -1,2 +1,3 @@\n-old\n+new\n+extra\n';
+  const { session } = run(CodexAdapter, [
+    cx(0, 'session_meta', { id: 's', cwd: 'e:\\work\\repo' }),
+    cx(1, 'event_msg', {
+      type: 'patch_apply_end',
+      call_id: 'exec-1',
+      success: true,
+      stdout: 'Success. Updated the following files:\nM E:\\work\\repo\\src\\a.php',
+      changes: {
+        'E:\\work\\repo\\src\\a.php': { type: 'update', unified_diff: diff, move_path: null },
+        'E:\\work\\repo\\src\\b.css': { type: 'update', unified_diff: '@@ -1 +1 @@\n-x\n+y\n', move_path: null },
+      },
+    }),
+  ]);
+  const edits = session.events.filter((e) => e.op?.category === 'edit');
+  assert.equal(edits.length, 2, 'one row per file, not one row per patch');
+  // The drive letter disagrees with the session cwd about its case, which is
+  // exactly what the real rollouts do.
+  assert.deepEqual(edits.map((e) => e.op.target), ['src/a.php', 'src/b.css']);
+  assert.equal(edits[0].format, 'diff');
+  assert.equal(edits[0].op.linesAdded, 2);
+  assert.equal(edits[0].op.linesRemoved, 1);
+  assert.equal(edits[0].op.subgroup, '.php');
+  // The diff never reached the model; the script call is where the cost was paid.
+  assert.equal(edits[0].tokens.payloadIn, 0);
+});
+
+test('codex reasoning that is stored encrypted is reported, not silently dropped', () => {
+  const { session, adapter } = run(CodexAdapter, [
+    cx(1, 'response_item', { type: 'reasoning', summary: [], encrypted_content: 'gAAAA…' }),
+    cx(2, 'response_item', { type: 'reasoning', summary: [], encrypted_content: 'gAAAA…' }),
+  ]);
+  assert.equal(session.events.filter((e) => e.kind === 'reasoning').length, 0);
+  assert.ok(adapter.b.quality.notes.some((n) => /encrypted/.test(n)));
+});
+
+test('a codex result body survives the expand path unchanged', () => {
+  const record = cx(2, 'response_item', {
+    type: 'custom_tool_call_output',
+    call_id: 'c1',
+    output: [{ type: 'input_text', text: 'Script completed\nWall time 0.1 seconds\nOutput:\n' }, { type: 'input_text', text: 'line one\nline two' }],
+  });
+  assert.equal(codexFullBody(record, { start: 0, end: 0, block: 1 }), 'line one\nline two');
 });
 
 /* ---------- cursor ---------- */

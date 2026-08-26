@@ -222,6 +222,19 @@ test/
 - **Codex** reports *cumulative* token counters, so per-request usage is a difference. A counter that
   goes backwards means the context was reset; the delta is clamped to zero and the session is
   annotated, so those totals are low rather than wrong-high.
+- **Codex runs everything through one tool.** Newer rollouts call `exec` with a *program* — JavaScript
+  that calls `tools.exec_command({cmd})` or hands `apply_patch` a patch envelope. The shell commands
+  are lifted out of the script for the row head and the operations table (so the table groups by `rg`
+  and `git`, not by one giant `exec` bucket), a patch envelope is decoded and shown as a diff instead
+  of an escaped string literal, and `Wall time 1.4 seconds` in the result becomes a *reported*
+  duration. Scripts that are more than a wrapper around one command are shown above the output they
+  produced.
+- **Codex records file edits on a separate channel.** `patch_apply_end` is the only record naming the
+  files a patch touched, so each one becomes its own edit row with its real diff — without them a
+  Codex session reads as pure shell noise and every metric that counts edits sees nothing. Those rows
+  carry no token cost: the diff never entered the model's context, only the summary the call returned.
+- **Codex reasoning is encrypted**, so those turns carry no readable text. The session says so rather
+  than looking as though it never thought.
 - **Cursor** records no token usage at all and often no per-message timestamps, so its token figures
   are estimated, its durations are mostly unavailable, and its busy clock does not exist. Its schema
   is undocumented and moves between versions; both adapters are labelled experimental until they have
