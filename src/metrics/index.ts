@@ -44,7 +44,7 @@ export function computeMetrics({ session, raw, samples, options }: MetricsInput)
     segments: segments.length,
     bytes: info.bytes,
     tokens: computeTokens(events),
-    time: computeTime(events, options.idleThresholdMs),
+    time: computeTime(events, options.idleThresholdMs, session.segments),
     ops: computeOps(events, options.mainThreadOnly ?? false),
     plan,
     phases,

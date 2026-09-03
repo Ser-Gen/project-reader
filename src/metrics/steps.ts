@@ -84,8 +84,12 @@ export function extractSteps(markdown: string): PlanStep[] {
 /** Token-set Dice coefficient: 2|A∩B| / (|A|+|B|). */
 export function dice(a: string, b: string): number {
   if (a === b) return 1;
-  const A = new Set(a.split(' ').filter(Boolean));
-  const B = new Set(b.split(' ').filter(Boolean));
+  return diceSets(tokenSet(a), tokenSet(b));
+}
+
+const tokenSet = (s: string): Set<string> => new Set(s.split(' ').filter(Boolean));
+
+function diceSets(A: Set<string>, B: Set<string>): number {
   if (!A.size || !B.size) return 0;
   let inter = 0;
   for (const t of A) if (B.has(t)) inter++;
@@ -122,14 +126,19 @@ export function matchSteps(prev: PlanStep[], next: PlanStep[]): StepMatch[] {
     }
   });
 
-  // Greedy best-similarity pairing over what is left.
+  // Greedy best-similarity pairing over what is left. Each step is normalized
+  // and tokenized once: doing it inside the loop makes an O(n²) comparison do
+  // O(n²) string work, which a long plan revised often can feel.
+  const prevNorm = prev.map((s) => normalizeStep(s.text));
+  const nextNorm = next.map((s) => normalizeStep(s.text));
+  const prevTok = prevNorm.map(tokenSet);
+  const nextTok = nextNorm.map(tokenSet);
   const pairs: { i: number; j: number; sim: number }[] = [];
   for (let i = 0; i < prev.length; i++) {
     if (usedPrev.has(i)) continue;
-    const a = normalizeStep(prev[i].text);
     for (let j = 0; j < next.length; j++) {
       if (usedNext.has(j)) continue;
-      const sim = dice(a, normalizeStep(next[j].text));
+      const sim = prevNorm[i] === nextNorm[j] ? 1 : diceSets(prevTok[i], nextTok[j]);
       if (sim >= MATCH_THRESHOLD) pairs.push({ i, j, sim });
     }
   }

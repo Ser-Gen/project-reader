@@ -243,6 +243,24 @@ test('questions survive the round trip from adapter to renderer', () => {
   assert.equal(back[0].options[1].preview, undefined, 'only the picked option carries its preview');
 });
 
+test('answers can arrive keyed by id and shaped as lists', () => {
+  const questions = [
+    { id: 'q1', question: 'Which approach?', options: askQs[0].options },
+    { id: 'q2', question: 'Which features?', options: askQs[1].options },
+  ];
+  // Codex keys by question id and always answers with an array; the encoding
+  // takes a lookup so neither adapter has to reshape what it was given.
+  const body = encodeAsk(questions, (q) =>
+    q.id === 'q1' ? ['Rewrite the logic'] : ['Snapping', 'Persistence', 'and dark mode'],
+  );
+  const back = decodeAsk(body);
+  assert.deepEqual(back[0].options.map((o) => o.picked), [false, true]);
+  assert.equal(back[0].multi, false, 'one answer is not a multi-select');
+  assert.equal(back[1].multi, true, 'several answers are the only evidence that it was');
+  assert.deepEqual(back[1].options.filter((o) => o.picked && !o.own).map((o) => o.label), ['Snapping', 'Persistence']);
+  assert.ok(back[1].options.some((o) => o.own && o.label === 'and dark mode'));
+});
+
 test('an unanswered question still lists what was on offer', () => {
   const body = encodeAsk(askQs.slice(0, 1), undefined);
   const back = decodeAsk(body);

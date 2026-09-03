@@ -172,7 +172,16 @@ export interface AskQuestion {
   header?: string;
   multiSelect?: boolean;
   options?: AskOption[];
+  /** Codex keys its answers by this instead of by the question text */
+  id?: string;
 }
+
+/**
+ * How a vendor hands back what the human chose. Claude answers a map keyed by
+ * the question text with one string; Codex keys by question id and answers with
+ * an array. A lookup covers both without either adapter reshaping its data.
+ */
+export type AskAnswers = Record<string, string> | ((q: AskQuestion) => string | string[] | undefined);
 
 /** Tabs and newlines are the protocol's own punctuation, so they cannot survive in a field. */
 const flat = (s: unknown): string => String(s ?? '').replace(/\t/g, '  ').replace(/\r?\n/g, '\\n');
@@ -216,14 +225,29 @@ export function pickedOptions(answer: string, options: readonly AskOption[]): { 
 }
 
 /** Encode the questions, their options and the human's answers into a body. */
-export function encodeAsk(questions: readonly AskQuestion[], answers: Record<string, string> | undefined): string {
+export function encodeAsk(questions: readonly AskQuestion[], answers: AskAnswers | undefined): string {
+  const look = typeof answers === 'function' ? answers : (q: AskQuestion) => answers?.[q.question];
   const out: string[] = [];
   for (const q of questions) {
     if (!q || typeof q !== 'object') continue;
     const options = Array.isArray(q.options) ? q.options : [];
-    out.push(`Q\t${flat(q.header)}\t${q.multiSelect ? 'any' : 'one'}\t${flat(q.question)}`);
-    const answer = answers?.[q.question];
-    const { picked, extra } = answer ? pickedOptions(String(answer), options) : { picked: new Set<number>(), extra: '' };
+    const given = answers ? look(q) : undefined;
+    // One answer or several: each is matched on its own, because a vendor that
+    // sends a list has already done the splitting that `pickedOptions` has to
+    // guess at when it is handed a single joined string.
+    const list = (Array.isArray(given) ? given : given == null ? [] : [given]).map(String).filter((a) => a.trim());
+    const picked = new Set<number>();
+    const extras: string[] = [];
+    for (const one of list) {
+      const hit = pickedOptions(one, options);
+      for (const i of hit.picked) picked.add(i);
+      if (hit.extra) extras.push(hit.extra);
+    }
+    const extra = extras.join(', ');
+    const answer = list.length > 0;
+    // Codex states no multi-select flag; more than one answer is the evidence.
+    const multi = q.multiSelect ?? list.length > 1;
+    out.push(`Q\t${flat(q.header)}\t${multi ? 'any' : 'one'}\t${flat(q.question)}`);
     options.forEach((o, i) => {
       const on = picked.has(i);
       out.push(`${on ? '+' : '-'}\t${flat(o?.label)}\t${flat(o?.description)}`);
@@ -233,6 +257,7 @@ export function encodeAsk(questions: readonly AskQuestion[], answers: Record<str
     });
     if (extra) out.push(`*\t${flat(extra)}`);
     if (!answer) out.push(`!\t${answers ? 'no answer recorded' : 'never answered'}`);
+
   }
   return out.join('\n');
 }

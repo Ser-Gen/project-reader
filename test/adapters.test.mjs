@@ -10,6 +10,9 @@ import { CodexAdapter, fullBody as codexFullBody, scriptCommands } from '../src/
 import { CursorAdapter, parseExportedChat, readCursorDb } from '../src/vendor/cursor.ts';
 import { SqliteDb } from '../src/vendor/sqlite.ts';
 import { detectFromText } from '../src/vendor/detect.ts';
+import { decodeAsk } from '../src/view/ask.ts';
+import { computeMetrics } from '../src/metrics/index.ts';
+import { DEFAULT_OPTIONS } from '../src/model/metrics.ts';
 
 export function run(Adapter, records) {
   const a = new Adapter('f1', 'test.jsonl', 0, 1, {});
@@ -381,6 +384,226 @@ test('a codex result body survives the expand path unchanged', () => {
     output: [{ type: 'input_text', text: 'Script completed\nWall time 0.1 seconds\nOutput:\n' }, { type: 'input_text', text: 'line one\nline two' }],
   });
   assert.equal(codexFullBody(record, { start: 0, end: 0, block: 1 }), 'line one\nline two');
+});
+
+/* ---------- codex: the item stream ---------- */
+
+const item = (sec, it, ms = 0) =>
+  cx(sec, 'event_msg', { type: 'item_completed', item: it, started_at_ms: 1000, completed_at_ms: 1000 + ms });
+
+const execCall = (sec, id, input) => cx(sec, 'response_item', { type: 'custom_tool_call', name: 'exec', call_id: id, input });
+const execOut = (sec, id, text) =>
+  cx(sec, 'response_item', { type: 'custom_tool_call_output', call_id: id, output: [{ type: 'input_text', text }] });
+
+const command = (over = {}) => ({
+  type: 'CommandExecution',
+  id: 'exec-1',
+  command: ['/bin/zsh', '-lc', 'rg -n Tip src'],
+  parsed_cmd: [{ type: 'search', cmd: 'rg -n Tip src' }],
+  status: 'completed',
+  stdout: 'src/a.ts:1: Tip\nsrc/b.ts:2: Tip\n',
+  stderr: '',
+  exit_code: 0,
+  duration: { secs: 0, nanos: 51_000_000 },
+  formatted_output: 'src/a.ts:1: Tip\n',
+  ...over,
+});
+
+test('a command item becomes the call it was launched by, with its own facts', () => {
+  const { session } = run(CodexAdapter, [
+    cx(0, 'session_meta', { id: 's', cwd: '/repo' }),
+    execCall(1, 'c1', 'const r = await tools.exec_command({cmd:"rg -n Tip src"});\ntext(r.output);\n'),
+    item(2, command(), 51),
+    execOut(3, 'c1', 'Script completed\nWall time 0.3 seconds\nOutput:\n{"exit_code":0}'),
+  ]);
+  const ops = session.events.filter((e) => e.kind === 'op');
+  assert.equal(ops.length, 1, 'one call and one item are one operation, as under Claude');
+  const op = ops[0];
+  assert.equal(op.op.name, 'exec_command');
+  // Codex classified the command itself; trusting it is what gives the ops
+  // table a read/search/execute split instead of one `exec` bucket.
+  assert.equal(op.op.category, 'search');
+  assert.equal(op.op.subgroup, 'rg');
+  assert.equal(op.subtitle, 'rg -n Tip src');
+  assert.equal(op.op.exitCode, 0);
+  assert.equal(op.durationMs, 51);
+  assert.equal(op.durationSource, 'reported');
+  // The row shows what the model was handed; the rest is one expand away.
+  assert.equal(op.body, 'src/a.ts:1: Tip\n');
+  assert.ok(op.more, 'and the fuller output is reachable');
+  assert.equal(op.fullLen, 'src/a.ts:1: Tip\nsrc/b.ts:2: Tip\n'.length);
+  assert.ok(op.chips.includes('full output on expand'));
+});
+
+test('a failing command is an error, and a sub-millisecond duration is not a measurement', () => {
+  const { session } = run(CodexAdapter, [
+    execCall(1, 'c1', 'tools.exec_command({cmd:"false"})'),
+    item(2, command({ exit_code: 1, duration: { secs: 0, nanos: 5958 }, formatted_output: 'boom', stdout: 'boom' })),
+    execOut(3, 'c1', 'Script completed\nWall time 0.4 seconds\nOutput:\n'),
+  ]);
+  const op = session.events.find((e) => e.kind === 'op');
+  assert.equal(op.op.status, 'error');
+  assert.equal(op.op.exitCode, 1);
+  // Codex reports 0 for commands that plainly took longer, so the call's own
+  // wall time stands in rather than a measurement nobody can believe.
+  assert.equal(op.durationMs, 400);
+});
+
+test('one call that did several things becomes several rows, and shows the program once', () => {
+  const script = 'const r = await Promise.all([\n  tools.view_image({path:"/repo/a.png"}),\n  tools.exec_command({cmd:"rg -n Tip src"}),\n]);\n';
+  const { session } = run(CodexAdapter, [
+    cx(0, 'session_meta', { id: 's', cwd: '/repo' }),
+    execCall(1, 'c1', script),
+    item(2, { type: 'ImageView', id: 'exec-a', path: 'file:///repo/a%20b.png' }),
+    item(3, command(), 51),
+    execOut(4, 'c1', 'Script completed\nWall time 1.0 seconds\nOutput:\nlots of text here'),
+  ]);
+  const ops = session.events.filter((e) => e.kind === 'op');
+  assert.deepEqual(ops.map((e) => e.op.name), ['view_image', 'exec_command']);
+  assert.deepEqual(ops.map((e) => e.op.category), ['read', 'search']);
+  assert.ok(ops[0].body.startsWith('const r = await Promise.all(['), 'the program is shown once, on the first row');
+  assert.ok(!ops[1].body.includes('Promise.all'), 'and not repeated on the rest');
+  assert.equal(ops[0].op.target, 'a b.png', 'the file:// path is decoded and shortened');
+  assert.ok(ops[0].chips.some((c) => /not stored/.test(c)), 'an image Codex only pointed at cannot be shown');
+  // One envelope carried both results back, so its cost is shared, not doubled.
+  const cost = ops.reduce((n, e) => n + (e.tokens.payloadOut ?? 0), 0);
+  assert.ok(cost > 0 && cost <= Math.ceil('Script completed\nWall time 1.0 seconds\nOutput:\nlots of text here'.length / 3));
+});
+
+test('a patch item becomes one edit row per file, and an added file reads as one', () => {
+  const { session } = run(CodexAdapter, [
+    cx(0, 'session_meta', { id: 's', cwd: '/repo' }),
+    execCall(1, 'c1', 'tools.apply_patch({patch})'),
+    item(2, {
+      type: 'FileChange',
+      id: 'exec-2',
+      status: 'completed',
+      changes: {
+        '/repo/src/a.ts': { type: 'update', unified_diff: '@@ -1,2 +1,2 @@\n-old\n+new\n' },
+        '/repo/src/new.css': { type: 'add', content: 'a {}\nb {}' },
+      },
+    }),
+    execOut(3, 'c1', 'Script completed\nWall time 0.2 seconds\nOutput:\nSuccess.'),
+  ]);
+  const edits = session.events.filter((e) => e.op?.category === 'edit');
+  assert.equal(edits.length, 2);
+  assert.deepEqual(edits.map((e) => e.op.target), ['src/a.ts', 'src/new.css']);
+  assert.equal(edits[0].format, 'diff');
+  assert.equal(edits[0].op.linesAdded, 1);
+  assert.equal(edits[1].op.linesAdded, 2, 'an added file counts as wholly added');
+  assert.ok(edits[1].body.startsWith('@@ -0,0 +1,2 @@'), 'written as a hunk so it reads like every other edit');
+  assert.ok(!edits[0].body.includes('apply_patch'), 'the envelope is not repeated above its own diff');
+});
+
+test('questions keyed by id, answered with lists, render as the decision they were', () => {
+  const questions = [
+    {
+      id: 'source',
+      header: 'Источник',
+      question: 'Which is authoritative?',
+      options: [
+        { label: 'Prod (Recommended)', description: 'The screenshots are the live interface.' },
+        { label: 'The other one', description: 'Keep going with what is started.' },
+      ],
+    },
+    {
+      id: 'scope',
+      header: 'Scope',
+      question: 'Which parts?',
+      options: [{ label: 'Alpha' }, { label: 'Beta' }, { label: 'Gamma' }],
+    },
+    { id: 'free', header: 'Notes', question: 'Anything else?', options: [{ label: 'No' }] },
+  ];
+  const { session } = run(CodexAdapter, [
+    cx(1, 'response_item', {
+      type: 'function_call',
+      name: 'request_user_input',
+      call_id: 'q1',
+      arguments: JSON.stringify({ questions }),
+    }),
+    cx(9, 'response_item', {
+      type: 'function_call_output',
+      call_id: 'q1',
+      output: JSON.stringify({
+        answers: {
+          source: { answers: ['Prod (Recommended)'] },
+          scope: { answers: ['Alpha', 'Gamma'] },
+          free: { answers: ['none of these, do it the other way'] },
+        },
+      }),
+    }),
+  ]);
+  const ask = session.events.find((e) => e.op?.name === 'request_user_input');
+  assert.equal(ask.op.category, 'ask');
+  assert.equal(ask.format, 'ask');
+  assert.equal(ask.op.status, 'ok');
+  assert.equal(ask.durationMs, 8000, 'a question is timed by how long the human took');
+
+  const back = decodeAsk(ask.body);
+  assert.equal(back.length, 3);
+  assert.deepEqual(back[0].options.map((o) => o.picked), [true, false]);
+  assert.equal(back[0].options[0].description, 'The screenshots are the live interface.');
+  // Two answers to one question is the only evidence that it took several.
+  assert.equal(back[1].multi, true);
+  assert.deepEqual(back[1].options.filter((o) => o.picked).map((o) => o.label), ['Alpha', 'Gamma']);
+  assert.equal(back[0].multi, false);
+  const typed = back[2].options.find((o) => o.own);
+  assert.equal(typed.label, 'none of these, do it the other way');
+});
+
+test('an unanswered question still shows what was on offer', () => {
+  const { session } = run(CodexAdapter, [
+    cx(1, 'response_item', {
+      type: 'function_call',
+      name: 'request_user_input',
+      call_id: 'q1',
+      arguments: JSON.stringify({ questions: [{ id: 'a', question: 'Which?', options: [{ label: 'One' }, { label: 'Two' }] }] }),
+    }),
+  ]);
+  const ask = session.events.find((e) => e.op?.name === 'request_user_input');
+  assert.equal(ask.format, 'ask');
+  assert.equal(ask.op.status, 'unpaired');
+  assert.equal(decodeAsk(ask.body)[0].options.filter((o) => !o.none).length, 2);
+});
+
+test('plans, searches and stray items all become rows of their own', () => {
+  const { session, adapter } = run(CodexAdapter, [
+    item(1, { type: 'Plan', id: 'p1', text: '# Plan\n\n- one\n- two\n' }),
+    item(2, {
+      type: 'Extension',
+      kind: 'web.search',
+      id: 'exec-3',
+      query: 'codex skills',
+      results: [{ type: 'text_result', title: 'Skills', url: 'https://developers.openai.com/x', snippet: 'about skills' }],
+    }, 3000),
+    // an operation item that no call is waiting for
+    item(3, command()),
+    cx(4, 'event_msg', { type: 'token_count', info: { last_token_usage: { input_tokens: 10, output_tokens: 5 } },
+      rate_limits: { primary: { used_percent: 37, window_minutes: 300 }, secondary: { used_percent: 14, window_minutes: 10080 }, plan_type: 'plus' } }),
+  ]);
+  const plan = session.events.find((e) => e.plan);
+  assert.equal(plan.op.category, 'plan');
+  assert.deepEqual(plan.plan.steps.map((s) => s.text), ['one', 'two']);
+
+  const web = session.events.find((e) => e.op?.category === 'web');
+  assert.equal(web.op.name, 'web.search');
+  assert.equal(web.subtitle, 'codex skills');
+  assert.ok(web.body.includes('[Skills](https://developers.openai.com/x)'));
+  assert.equal(web.durationMs, 3000);
+
+  assert.ok(session.events.some((e) => e.op?.name === 'exec_command'), 'a stray item is still an operation');
+  assert.ok(adapter.b.quality.notes.some((n) => /rate limits at 37% of the 5-hour/.test(n)));
+});
+
+test('a turn that reported its own time to first token is not guessed at', () => {
+  const { session, adapter } = run(CodexAdapter, [
+    cx(1, 'response_item', { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'go' }] }),
+    cx(2, 'response_item', { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'ok' }] }),
+    cx(3, 'event_msg', { type: 'task_complete', duration_ms: 12_000, time_to_first_token_ms: 4613 }),
+  ]);
+  const metrics = computeMetrics({ session, raw: adapter.b.quality, samples: [], options: DEFAULT_OPTIONS });
+  assert.equal(metrics.time.thinkMs.value, 4613);
+  assert.equal(metrics.time.thinkMs.provenance, 'reported');
 });
 
 /* ---------- cursor ---------- */

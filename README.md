@@ -222,19 +222,34 @@ test/
 - **Codex** reports *cumulative* token counters, so per-request usage is a difference. A counter that
   goes backwards means the context was reset; the delta is clamped to zero and the session is
   annotated, so those totals are low rather than wrong-high.
-- **Codex runs everything through one tool.** Newer rollouts call `exec` with a *program* — JavaScript
-  that calls `tools.exec_command({cmd})` or hands `apply_patch` a patch envelope. The shell commands
-  are lifted out of the script for the row head and the operations table (so the table groups by `rg`
-  and `git`, not by one giant `exec` bucket), a patch envelope is decoded and shown as a diff instead
-  of an escaped string literal, and `Wall time 1.4 seconds` in the result becomes a *reported*
-  duration. Scripts that are more than a wrapper around one command are shown above the output they
-  produced.
-- **Codex records file edits on a separate channel.** `patch_apply_end` is the only record naming the
-  files a patch touched, so each one becomes its own edit row with its real diff — without them a
-  Codex session reads as pure shell noise and every metric that counts edits sees nothing. Those rows
-  carry no token cost: the diff never entered the model's context, only the summary the call returned.
-- **Codex reasoning is encrypted**, so those turns carry no readable text. The session says so rather
-  than looking as though it never thought.
+- **Codex runs everything through one tool.** Rollouts call `exec` with a *program* — JavaScript that
+  calls `tools.exec_command({cmd})`, `apply_patch`, `view_image` or `web.search`. So the operations
+  are what that program did, and Codex reports them on a second channel: `item_completed` events
+  carrying the command, its `cwd`, Codex's own read/search/execute classification of it, the exit
+  code, the duration and the output. Reading operations from there is what gives a Codex session the
+  same shape a Claude session has — one row per command, patched file, search or image — instead of
+  fifty identical `exec` rows. Which channel wins is decided **per call**, so older rollouts that have
+  no item stream keep the script-parsing path: their shell commands are still lifted out of the script
+  for the row head, and a patch envelope is still decoded and shown as a diff.
+- **One call is usually one row.** Most calls emit exactly one item. A program that did several
+  different things becomes several rows and is shown once above the first, the way parallel tool calls
+  already work; the cost of the one envelope that carried the results back is shared between them
+  rather than charged to whichever row came first.
+- **A command's row shows what the model was given** — Codex truncates long output before the model
+  sees it — and the full `stdout` is one expand away, marked with a chip.
+- **Codex file edits, plans, web searches and questions all arrive as items.** Each patched file is
+  its own edit row with its diff; plans become plan revisions (in the newer format there is no plan
+  *tool* at all, so without this the Plan tab would stay empty); `web.search` becomes a link list; and
+  `request_user_input` becomes the same question row Claude's `AskUserQuestion` gets — every option
+  with its description, the chosen one marked, and free-typed answers kept verbatim. Codex keys its
+  answers by question id and returns them as lists, which is the only evidence that a question took
+  more than one.
+- **Codex times its own turns.** `time_to_first_token_ms` makes think time *reported* rather than
+  inferred from record stamps, and the last usage record's rate limits become a line in the quality
+  panel. Per-command durations under a millisecond are treated as bookkeeping, not measurements: the
+  call's own wall time stands in.
+- **Codex reasoning carries no readable text** — encrypted in one format, empty in the other. The
+  session says so rather than looking as though it never thought.
 - **Cursor** records no token usage at all and often no per-message timestamps, so its token figures
   are estimated, its durations are mostly unavailable, and its busy clock does not exist. Its schema
   is undocumented and moves between versions; both adapters are labelled experimental until they have

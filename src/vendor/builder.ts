@@ -80,6 +80,12 @@ export interface AddSpec {
 
 export interface ResultSpec {
   text: string;
+  /**
+   * The complete text this body stands for, when the row deliberately shows
+   * less than the whole — a command's full output behind the truncated version
+   * the model was given. Drives "show more" and is what expand serves.
+   */
+  fullText?: string;
   format: BodyFormat;
   cls?: ContentClass;
   chips?: string[];
@@ -243,10 +249,11 @@ export class Builder {
     const ev = this.events[idx];
     if (!ev || !ev.op) return;
     const clipped = this.clip(res.text);
+    const full = res.fullText && res.fullText.length > res.text.length ? res.fullText : res.text;
     ev.body = clipped.body;
     ev.format = res.format;
-    ev.more = clipped.more;
-    ev.fullLen = clipped.fullLen;
+    ev.more = full.length > clipped.body.length;
+    ev.fullLen = full.length;
     ev.chips = res.chips?.length ? res.chips : ev.chips;
     ev.op.status = res.status;
     if (res.exitCode !== undefined) ev.op.exitCode = res.exitCode;
@@ -280,7 +287,7 @@ export class Builder {
       s.block = src.block;
       s.tool = ev.op.name;
       s.stored = undefined;
-      this.retain(s, res.text, clipped.body);
+      this.retain(s, full, clipped.body);
     }
   }
 

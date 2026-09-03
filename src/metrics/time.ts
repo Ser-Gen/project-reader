@@ -10,7 +10,7 @@
  *            is the only sound answer to "how much time did operations take".
  */
 
-import type { CanonEvent } from '../model/canon.js';
+import type { CanonEvent, Segment } from '../model/canon.js';
 import { metric, unavailable, type IdleGap, type Metric, type TimeStats } from '../model/metrics.js';
 
 export interface Interval {
@@ -72,7 +72,11 @@ function median(values: number[]): number | null {
   return s[s.length >> 1];
 }
 
-export function computeTime(events: readonly CanonEvent[], thresholdMs: number): TimeStats {
+export function computeTime(
+  events: readonly CanonEvent[],
+  thresholdMs: number,
+  segments: readonly Segment[] = [],
+): TimeStats {
   let first = 0;
   let last = 0;
   let stamped = 0;
@@ -115,7 +119,11 @@ export function computeTime(events: readonly CanonEvent[], thresholdMs: number):
   const clock = (v: number, note?: string): Metric =>
     stamped ? metric(v, 'derived', coverage, note) : unavailable('no timestamps recorded');
 
-  const thinkMs = median(think);
+  // A vendor that timed its own turns has measured what this otherwise infers
+  // from when records happened to be written.
+  const reportedTtft = segments.map((s) => s.ttftMs).filter((v): v is number => typeof v === 'number' && v >= 0);
+  const thinkMs = reportedTtft.length ? median(reportedTtft) : median(think);
+  const thinkReported = reportedTtft.length > 0;
   const humanMs = median(human);
 
   return {
@@ -127,7 +135,14 @@ export function computeTime(events: readonly CanonEvent[], thresholdMs: number):
     idleMs: clock(idle),
     idleGaps: gaps,
     idleThresholdMs: thresholdMs,
-    thinkMs: thinkMs === null ? unavailable() : metric(thinkMs, 'derived', undefined, 'median per turn'),
+    thinkMs:
+      thinkMs === null ? unavailable()
+      : metric(
+          thinkMs,
+          thinkReported ? 'reported' : 'derived',
+          undefined,
+          thinkReported ? 'median time to first token' : 'median per turn',
+        ),
     humanMs: humanMs === null ? unavailable() : metric(humanMs, 'derived', undefined, 'median per prompt'),
   };
 }

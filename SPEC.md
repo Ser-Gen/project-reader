@@ -838,6 +838,19 @@ way is not a decision (measured: 94 real asks, median 2.6 KB, largest 5.0 KB); a
 gained `payloadOut`, since the options travel in the *call* and echoing them into the result's
 context cost would count them twice.
 
+**A7. Codex operations are read from the item stream, decided per call.** (§4.3)
+Codex gives the model one tool, `exec`, whose argument is a program; the operations are what the
+program did, and the runtime reports them separately as `item_completed` events. Taking operations
+from there reproduces Claude's granularity — one command, patched file, search or image per row — and
+the data cooperates: 43 of 51 calls in the sample emit exactly one item, so one call is still one row.
+The switch is per call rather than per file, so a rollout with no item stream keeps the older
+script-parsing path and nothing has to sniff the format up front. Three consequences: a call that did
+several *different* things shows its script once above the first row and shares the cost of the single
+result envelope between them by text length; a sub-millisecond `duration` is treated as bookkeeping
+rather than a measurement (two independent fields agree on 0 ms for commands that plainly took
+longer), with the call's wall time standing in; and `ResultSpec` gained `fullText`, so a row can show
+the truncated output the model was given while expand serves the whole of `stdout`.
+
 ### 14.2 Not implemented
 
 - **Conversation stitching (§8.2).** Sessions are still one file each. Compactions are marked and

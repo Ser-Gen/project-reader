@@ -43,9 +43,15 @@ tools/         inspect.mjs, gen-fixture.mjs, scenario.mjs (known-answer fixture)
 - **The estimator refuses to fit** when the required factor leaves `[0.7, 1.4]` — reasoning tokens are
   billed but not persisted, so a real Claude transcript cannot calibrate it. That refusal is a
   feature; do not tune the divisors to close the gap (SPEC §14 A2).
+- **Codex has two rollout formats and the newer one hides its operations.** Everything runs through a
+  single `exec` tool whose argument is a script; the real operations arrive as `item_completed`
+  events. `codex.ts` prefers those *per call* — if items appeared between a call and its output they
+  win, otherwise the script-parsing path runs. Never read content from both channels: messages and
+  reasoning arrive on each, and counting them twice doubles every token figure.
 - **The `ask` body format is a line protocol split across two files** — `encodeAsk` in
   `vendor/text.ts`, `decodeAsk`/`renderAsk` in `view/ask.ts`. They must stay in step; a round-trip
-  test in `test/parser.test.mjs` is the guard.
+  test in `test/parser.test.mjs` is the guard. `encodeAsk` takes either an answers map keyed by
+  question text (Claude) or a lookup (Codex, which keys by question id and answers with lists).
 - **One global stylesheet, short class names.** Grep `src/styles/app.css` before inventing a class —
   `.mk` already meant "phase marker" and silently wrecked a new component.
 - **All transcript text is untrusted**: escape at the point of rendering (`escapeHtml`), never

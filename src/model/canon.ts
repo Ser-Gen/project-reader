@@ -161,6 +161,8 @@ export interface Segment {
   toolCount: number;
   imageCount: number;
   fileCount: number;
+  /** time to first token, when the vendor reported it for this turn */
+  ttftMs?: number;
 }
 
 export interface SessionInfo {
