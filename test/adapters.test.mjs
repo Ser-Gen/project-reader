@@ -595,6 +595,86 @@ test('plans, searches and stray items all become rows of their own', () => {
   assert.ok(adapter.b.quality.notes.some((n) => /rate limits at 37% of the 5-hour/.test(n)));
 });
 
+test('a page the agent wrote for the human is rebuilt, shown, and kept out of the edit numbers', () => {
+  const VIZ = '/Users/me/.codex/visualizations/2026/09/03/s1/options.html';
+  const directive = (title) => `\ue200visualize\ue202${JSON.stringify({ path: VIZ, mode: 'wide', title })}\ue201`;
+  const { session } = run(CodexAdapter, [
+    cx(0, 'session_meta', { id: 's', cwd: '/repo' }),
+    execCall(1, 'c1', 'tools.apply_patch({patch})'),
+    item(2, {
+      type: 'FileChange',
+      id: 'exec-1',
+      status: 'completed',
+      changes: { [VIZ]: { type: 'add', content: '<p>one</p>\n<p>two</p>' } },
+    }),
+    execOut(3, 'c1', 'Script completed\nWall time 0.1 seconds\nOutput:\nSuccess.'),
+    cx(4, 'response_item', {
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'output_text', text: `${directive('Первый вариант')}\n\nWhich one?` }],
+    }),
+    // the page is revised, and mentioned again — each mention shows the page as
+    // it stood at that moment
+    execCall(5, 'c2', 'tools.apply_patch({patch})'),
+    item(6, {
+      type: 'FileChange',
+      id: 'exec-2',
+      status: 'completed',
+      changes: { [VIZ]: { type: 'update', unified_diff: '@@ -1,2 +1,2 @@\n-<p>one</p>\n+<p>ONE</p>\n <p>two</p>\n' } },
+    }),
+    execOut(7, 'c2', 'Script completed\nWall time 0.1 seconds\nOutput:\nSuccess.'),
+    cx(8, 'response_item', {
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'output_text', text: `${directive('Второй вариант')}\n\nBetter?` }],
+    }),
+  ]);
+
+  // The sentinels never reach the reader, and neither does the JSON blob.
+  for (const ev of session.events) {
+    assert.ok(!/[\ue200\ue201\ue202]/.test(ev.body), 'a directive is not left in the text');
+    assert.ok(!ev.body.includes('"mode":"wide"'));
+  }
+
+  const shown = session.events.filter((e) => e.kind === 'text' && e.widgets?.length);
+  assert.equal(shown.length, 2);
+  assert.equal(shown[0].widgets[0].title, 'Первый вариант');
+  assert.equal(shown[0].widgets[0].html, '<p>one</p>\n<p>two</p>', 'the page as it stood when it was shown');
+  assert.equal(shown[1].widgets[0].html, '<p>ONE</p>\n<p>two</p>', 'and after it was revised');
+  assert.equal(shown[0].body, 'Which one?', 'the prose survives on its own');
+
+  // Writing it is an operation, but not a change to the project.
+  const viz = session.events.filter((e) => e.op?.name === 'visualize');
+  assert.equal(viz.length, 2);
+  assert.equal(viz[0].op.category, 'other');
+  assert.ok(viz[0].chips.includes('visualization'));
+  assert.equal(viz[0].op.linesAdded, undefined, 'scratch HTML is not lines of implementation');
+  assert.equal(session.events.filter((e) => e.op?.category === 'edit').length, 0);
+});
+
+test('a visualization that cannot be replayed is dropped, not guessed at', () => {
+  const VIZ = '/Users/me/.codex/visualizations/2026/09/03/s1/options.html';
+  const { session, adapter } = run(CodexAdapter, [
+    item(1, { type: 'FileChange', id: 'x1', status: 'completed', changes: { [VIZ]: { type: 'add', content: 'a\nb' } } }),
+    // a hunk whose context does not match what we hold
+    item(2, {
+      type: 'FileChange',
+      id: 'x2',
+      status: 'completed',
+      changes: { [VIZ]: { type: 'update', unified_diff: '@@ -1,2 +1,2 @@\n-nope\n+c\n b\n' } },
+    }),
+    cx(3, 'response_item', {
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'output_text', text: `\ue200visualize\ue202{"path":"${VIZ}"}\ue201\n\nhere` }],
+    }),
+  ]);
+  const msg = session.events.find((e) => e.kind === 'text');
+  assert.equal(msg.widgets, undefined, 'half a page is worse than none');
+  assert.equal(msg.body, 'here');
+  assert.ok(adapter.b.quality.notes.some((n) => /could not replay/.test(n)));
+});
+
 test('a turn that reported its own time to first token is not guessed at', () => {
   const { session, adapter } = run(CodexAdapter, [
     cx(1, 'response_item', { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'go' }] }),

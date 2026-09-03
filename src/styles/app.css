@@ -388,6 +388,23 @@ html, body {
 .body a { color: var(--accent); }
 .body code { font: 12px var(--mono); background: var(--bg-3); padding: 0 4px; border-radius: 4px; }
 
+/* a page the agent wrote for the human, rendered in a locked-down frame */
+.viz { margin: 0 0 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-2); overflow: hidden; }
+.viz figcaption { display: flex; align-items: baseline; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--line); }
+.viz .vk {
+  font: 500 10.5px/1.6 var(--sans);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--c-image);
+  border: 1px solid color-mix(in srgb, var(--c-image) 35%, transparent);
+  border-radius: 4px;
+  padding: 0 5px;
+}
+.viz .vt { font-weight: 550; }
+.viz .vf { margin-left: auto; font: 11px var(--mono); color: var(--fg-faint); }
+.viz iframe { display: block; width: 100%; height: 420px; border: 0; background: var(--bg); resize: vertical; }
+.viz .vn { border-bottom: 0; border-top: 1px solid var(--line); font-size: 11px; color: var(--fg-faint); }
+
 /* question rows: every option that was offered, with the picked one marked */
 .ask { display: flex; flex-direction: column; gap: 12px; }
 .askq { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px; margin-bottom: -4px; }

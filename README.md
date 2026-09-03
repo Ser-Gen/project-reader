@@ -29,7 +29,8 @@ transcript's `structuredPatch`; shell calls show the command with its stdout/std
 interrupted/error badge; reads show the path and line count; web calls become link lists with
 timing; todo writes become checklists; plans render as markdown; a question to the human shows every
 option it offered, with its description, and marks the one that was picked; screenshots appear
-inline and open in a lightbox. Operation rows and reasoning start folded. Rows carrying a screenshot
+inline and open in a lightbox, and a page the agent rendered for the human is shown where it showed
+it, inside a frame that cannot run it. Operation rows and reasoning start folded. Rows carrying a screenshot
 start open, since the picture is the result.
 
 **Per-row analytics.** Every operation row carries what it cost — `~1.4k` estimated context tokens —
@@ -248,6 +249,17 @@ test/
   inferred from record stamps, and the last usage record's rate limits become a line in the quality
   panel. Per-command durations under a millisecond are treated as bookkeeping, not measurements: the
   call's own wall time stands in.
+- **Codex's `visualize` skill writes a page and asks its host to show it.** The agent writes HTML into
+  a per-session directory outside the project and refers to it from its own message with three
+  private-use sentinels around a name and a JSON payload — invisible characters that any other reader
+  prints as tofu followed by a blob of JSON. The reader parses them, rebuilds the document from the
+  transcript (the first write carries the whole file, later ones only a diff), and renders it inline
+  in a fully restricted `sandbox` iframe: the agent's markup and styling appear, its scripts do not
+  run. A page mentioned three times shows the version that existed at each mention. If a revision
+  cannot be replayed the page is dropped rather than guessed at, and the session says so.
+- **Writing one is an operation, not an edit.** Those files live in the agent's own scratch directory,
+  so counting them would put a few hundred lines of throwaway HTML into files touched, lines added,
+  implementation end and unplanned work. They appear as `visualize` operations instead.
 - **Codex reasoning carries no readable text** — encrypted in one format, empty in the other. The
   session says so rather than looking as though it never thought.
 - **Cursor** records no token usage at all and often no per-message timestamps, so its token figures

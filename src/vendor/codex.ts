@@ -27,15 +27,19 @@ import type {
   OpFacts,
   OpStatus,
   PlanArtifact,
+  Widget,
 } from '../model/canon.js';
 import type { ContentClass } from '../metrics/estimate.js';
 import type { Calibration } from '../metrics/estimate.js';
 import { extractSteps } from '../metrics/steps.js';
 import { Builder, type EventSource } from './builder.js';
 import {
+  applyUnifiedDiff,
   asText,
   type AskQuestion,
   encodeAsk,
+  flattenWidgets,
+  parseWidgets,
   basename,
   commandHead,
   countDiffLines,
@@ -68,6 +72,18 @@ const CATEGORY: Record<string, OpCategory> = {
   'web.search': 'web',
   wait: 'other',
 };
+
+/**
+ * Where Codex's `visualize` skill puts the pages it writes: a per-session
+ * directory outside the project, listed in the sandbox's writable roots. Work
+ * there is an artifact made for the conversation, not a change to the codebase,
+ * and counting it as one would put a scratch HTML file into every metric that
+ * measures implementation.
+ */
+const VIZ_RE = /(^|\/)\.codex\/visualizations\//;
+
+/** The largest document worth rebuilding so the reader can show it. */
+const MAX_WIDGET = 128 * 1024;
 
 /** Items that describe an operation, rather than repeating the message stream. */
 const OP_ITEMS = new Set(['CommandExecution', 'FileChange', 'Extension', 'ImageView']);
@@ -230,6 +246,9 @@ interface ItemRow {
   name: string;
   category: OpCategory;
   target?: string;
+  /** the path exactly as the transcript wrote it, for content tracking */
+  srcPath?: string;
+  widgets?: Widget[];
   subgroup?: string;
   subtitle?: string;
   chips: string[];
@@ -327,8 +346,8 @@ export function itemRows(it: any, rel: (p: string) => string = (p) => p): ItemRo
         subgroup: category === 'read' && path ? extname(path) || basename(path) : commandHead(cmd),
         subtitle: cmds.length > 1 ? `${firstLine(cmd, 120)} (+${cmds.length - 1} more)` : firstLine(cmd, 160),
         chips,
-        text: stripAnsi(shown),
-        fullText: full.length > shown.length ? stripAnsi(full) : undefined,
+        text: flattenWidgets(stripAnsi(shown)),
+        fullText: full.length > shown.length ? flattenWidgets(stripAnsi(full)) : undefined,
         format: 'text',
         cls: 'terminal',
         status: it.status === 'failed' || (exitCode !== undefined && exitCode !== 0) ? 'error' : 'ok',
@@ -354,21 +373,27 @@ export function itemRows(it: any, rel: (p: string) => string = (p) => p): ItemRo
         : '';
       const counts = countDiffLines(text);
       const shortened = rel(path);
+      // A page written for the conversation is not a change to the project;
+      // counting it as an edit puts scratch HTML into every implementation
+      // number the dock reports.
+      const viz = VIZ_RE.test(path.replace(/\\/g, '/'));
       const chips = [kind];
+      if (viz) chips.push('visualization');
       if (change?.move_path) chips.push(`\u2192 ${rel(String(change.move_path))}`);
       rows.push({
-        name: 'apply_patch',
-        category: 'edit',
-        target: shortened,
-        subgroup: extname(shortened) || basename(shortened) || '(no extension)',
-        subtitle: shortened,
+        name: viz ? 'visualize' : 'apply_patch',
+        category: viz ? 'other' : 'edit',
+        target: viz ? basename(shortened) : shortened,
+        subgroup: viz ? 'visualization' : extname(shortened) || basename(shortened) || '(no extension)',
+        subtitle: viz ? basename(shortened) : shortened,
+        srcPath: path,
         chips,
         text,
         format: text ? 'diff' : 'text',
         cls: 'code',
         status: failed ? 'error' : 'ok',
-        adds: counts.adds,
-        dels: counts.dels,
+        adds: viz ? undefined : counts.adds,
+        dels: viz ? undefined : counts.dels,
       });
     }
     return rows;
@@ -451,6 +476,8 @@ export class CodexAdapter {
   /** the call currently awaiting its output, and the items it has produced */
   private openCallId = '';
   private itemsFor = new Map<string, PendingItem[]>();
+  /** visualization path -> the document as it currently stands */
+  private docs = new Map<string, string>();
   /** call id -> the questions it put to the human */
   private asked = new Map<string, AskQuestion[]>();
   private sawItems = false;
@@ -518,8 +545,10 @@ export class CodexAdapter {
     this.sawResponseItems = true;
     switch (p.type) {
       case 'message': {
-        const { text, images, files } = messageParts(p);
-        if (!text.trim() && !images.length) return;
+        const parts = messageParts(p);
+        const { text, widgets } = this.widgetsOf(parts.text);
+        const { images, files } = parts;
+        if (!text.trim() && !images.length && !widgets.length) return;
         const human = p.role === 'user';
         // `developer` is the IDE's own context, not something a human wrote:
         // counting it as a prompt would split the session into phantom turns.
@@ -536,6 +565,7 @@ export class CodexAdapter {
             format: 'md',
             cls: 'prose',
             images: images.length ? images : undefined,
+            widgets: widgets.length ? widgets : undefined,
             chips: files.length ? files : undefined,
             collapsed: dev || undefined,
             id: p.id,
@@ -730,7 +760,7 @@ export class CodexAdapter {
 
   /** A plan, which in this format is an item and never a tool call. */
   private planRow(it: any, ts: number, tsSource: any, start: number, end: number): void {
-    const text = String(it.text ?? '');
+    const { text, widgets } = this.widgetsOf(String(it.text ?? ''));
     const idx = this.b.add(
       {
         kind: 'op',
@@ -741,6 +771,7 @@ export class CodexAdapter {
         text,
         format: 'md',
         cls: 'prose',
+        widgets: widgets.length ? widgets : undefined,
         collapsed: true,
         op: { name: 'plan', category: 'plan', status: 'ok' },
         payloadIn: 0,
@@ -760,8 +791,61 @@ export class CodexAdapter {
 
   private itemRowsOf(pending: PendingItem): ItemRow[] {
     const rows = itemRows(pending.it, (path) => this.rel(path));
-    for (const row of rows) if (row.durationMs === undefined) row.durationMs = pending.ms;
+    for (const row of rows) {
+      if (row.durationMs === undefined) row.durationMs = pending.ms;
+      if (row.name !== 'visualize' || !row.srcPath) continue;
+      const html = this.trackDoc(row.srcPath, pending.it?.changes?.[row.srcPath]);
+      // The page is the point of the operation, so the row that wrote it shows
+      // it, the way a row carrying a screenshot does.
+      if (html) row.widgets = [{ kind: 'visualize', title: basename(row.srcPath), path: row.srcPath, html }];
+    }
     return rows;
+  }
+
+  /**
+   * Rebuild a written document as the session goes: the first change carries
+   * the whole file, later ones only a diff. A diff that will not apply drops
+   * the document rather than guessing — half a page is worse than none.
+   */
+  private trackDoc(path: string, change: any): string | undefined {
+    if (!change || typeof change !== 'object') return undefined;
+    if (typeof change.content === 'string') {
+      if (change.content.length > MAX_WIDGET) return undefined;
+      this.docs.set(path, change.content);
+      return change.content;
+    }
+    const prev = this.docs.get(path);
+    if (prev === undefined || typeof change.unified_diff !== 'string') return prev;
+    const next = applyUnifiedDiff(prev, change.unified_diff);
+    if (next === null || next.length > MAX_WIDGET) {
+      this.docs.delete(path);
+      this.b.note('Codex: a visualization was revised in a way this reader could not replay; later versions of it are not shown.');
+      return undefined;
+    }
+    this.docs.set(path, next);
+    return next;
+  }
+
+  /**
+   * Directives the agent aimed at its host — "show this page here". The text
+   * keeps the prose; the page itself becomes a widget on the same row, taken
+   * as it stood at that moment, since the agent revised it between mentions.
+   */
+  private widgetsOf(text: string): { text: string; widgets: Widget[] } {
+    const parsed = parseWidgets(text);
+    const widgets: Widget[] = [];
+    for (const d of parsed.widgets) {
+      const path = typeof d.args.path === 'string' ? d.args.path : '';
+      const html = path ? this.docs.get(path) : undefined;
+      if (!html) continue;
+      widgets.push({
+        kind: d.name,
+        title: typeof d.args.title === 'string' && d.args.title ? d.args.title : basename(path),
+        path,
+        html,
+      });
+    }
+    return { text: parsed.text, widgets };
   }
 
   /** Add a row for an item that no call will close. */
@@ -798,6 +882,7 @@ export class CodexAdapter {
         format: row.format,
         cls: row.cls,
         chips: [...(ev.chips ?? []), ...row.chips],
+        widgets: row.widgets,
         status: row.status,
         exitCode: row.exitCode,
         linesAdded: row.adds,
@@ -1086,7 +1171,9 @@ export class CodexAdapter {
       if (typeof (out as any).output === 'string') text = (out as any).output;
       if (typeof (out as any).exit_code === 'number') exitCode = (out as any).exit_code;
     }
-    text = stripAnsi(text);
+    // A skill's own documentation, quoted back by a command that read it, is
+    // full of directive templates. They are text here, not instructions.
+    text = flattenWidgets(stripAnsi(text));
     if (exitCode !== undefined && exitCode !== 0) status = 'error';
     if (p.success === false || /^error:/i.test(text)) status = 'error';
 

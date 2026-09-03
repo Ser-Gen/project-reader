@@ -104,6 +104,30 @@ test('rows render operation cost and duration, and mark parallel timings', () =>
   assert.ok(!promptHtml.includes('chip tok'), 'only operations carry cost chips');
 });
 
+test('a page the agent wrote renders in a frame that cannot run it', () => {
+  const ev = {
+    ...session.events.find((e) => e.kind === 'prompt'),
+    widgets: [
+      {
+        kind: 'visualize',
+        title: 'Options',
+        path: '/home/me/.codex/visualizations/x/options.html',
+        html: '<p onclick="alert(1)">hi</p><script>alert(2)</script>" onload="alert(3)',
+      },
+    ],
+  };
+  const html = renderRow(ev, true, false);
+  assert.ok(html.includes('<iframe sandbox=""'), 'every capability is withheld, scripts included');
+  assert.ok(html.includes('srcdoc="'));
+  // The agent's markup lives inside one attribute and cannot climb out of it.
+  assert.ok(!html.includes('<script>'));
+  assert.ok(!html.includes('onload="alert'));
+  assert.ok(html.includes('&lt;script&gt;alert(2)&lt;/script&gt;'));
+  assert.ok(html.includes('&quot; onload=&quot;alert(3)'));
+  assert.ok(html.includes('options.html'), 'the row says which file it is showing');
+  assert.ok(html.includes('scripts are not run here'));
+});
+
 test('untrusted transcript text cannot break out of a row', () => {
   const nasty = {
     ...session.events.find((e) => e.kind === 'prompt'),

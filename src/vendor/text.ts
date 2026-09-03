@@ -261,3 +261,101 @@ export function encodeAsk(questions: readonly AskQuestion[], answers: AskAnswers
   }
   return out.join('\n');
 }
+
+/* ------------------------------------------------------------------ *
+ * Inline widget directives.
+ *
+ * Codex marks a request to its host — "show this page here" — with three
+ * Private Use Area sentinels around a name and a JSON payload:
+ *
+ *     U+E200 visualize U+E202 {"path":"…","mode":"wide","title":"…"} U+E201
+ *
+ * The desktop app swaps that span for the rendered page. Anything that does
+ * not know the convention prints two boxes of tofu and a blob of JSON in the
+ * middle of the answer, which is what this is here to prevent.
+ * ------------------------------------------------------------------ */
+
+const W_START = '\ue200';
+const W_SEP = '\ue202';
+const W_END = '\ue201';
+const WIDGET = new RegExp(`${W_START}([^${W_SEP}${W_END}]*)${W_SEP}?([^${W_END}]*)${W_END}`, 'g');
+
+export interface WidgetDirective {
+  name: string;
+  args: Record<string, unknown>;
+}
+
+/**
+ * Pull the directives out of a text, leaving the prose behind.
+ *
+ * Used where the reader can act on them. Elsewhere — a skill's own
+ * documentation quoted back inside command output, say — `flattenWidgets`
+ * keeps the text readable without pretending it is a directive.
+ */
+export function parseWidgets(text: string): { text: string; widgets: WidgetDirective[] } {
+  if (!text.includes(W_START)) return { text, widgets: [] };
+  const widgets: WidgetDirective[] = [];
+  const out = text.replace(WIDGET, (_m, name: string, payload: string) => {
+    let args: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse(payload);
+      if (parsed && typeof parsed === 'object') args = parsed as Record<string, unknown>;
+    } catch {
+      /* a payload that will not parse is not a directive this can act on */
+    }
+    widgets.push({ name: String(name || 'widget'), args });
+    return '';
+  });
+  // Removing a directive usually leaves the blank line that followed it.
+  return { text: out.replace(/^\s*\n/, '').replace(/\n{3,}/g, '\n\n'), widgets };
+}
+
+/** The same spans written as plain text, for bodies that only need to be read. */
+export function flattenWidgets(text: string): string {
+  if (!text.includes(W_START)) return text;
+  return text.replace(WIDGET, (_m, name: string, payload: string) => `${name}${payload}`);
+}
+
+/**
+ * Apply a unified diff, or refuse.
+ *
+ * Only used to rebuild a document the agent wrote and then revised, so that
+ * the reader can show what the human was shown. It is deliberately strict:
+ * a hunk whose context does not match returns null rather than a plausible
+ * reconstruction, because a wrong page is worse than no page.
+ */
+export function applyUnifiedDiff(text: string, diff: string): string | null {
+  const src = text.split('\n');
+  const out: string[] = [];
+  const lines = diff.split('\n');
+  let at = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const head = /^@@ -(\d+)(?:,\d+)? \+\d+(?:,\d+)? @@/.exec(lines[i]);
+    if (!head) continue;
+    const start = Number(head[1]) - 1;
+    if (start < at || start > src.length) return null;
+    out.push(...src.slice(at, start));
+    at = start;
+    for (i++; i < lines.length && !/^@@ /.test(lines[i]); i++) {
+      const line = lines[i];
+      if (line.startsWith('\\ No newline')) continue;
+      const body = line.slice(1);
+      if (line[0] === '+') out.push(body);
+      else if (line[0] === '-') {
+        if (src[at] !== body) return null;
+        at++;
+      } else if (line === '') {
+        // Generators disagree about blank context: some write " ", some write
+        // nothing at all, and the trailing newline leaves one either way.
+        if (src[at] === '') out.push(src[at++]);
+      } else {
+        if (src[at] !== body) return null;
+        out.push(src[at]);
+        at++;
+      }
+    }
+    i--;
+  }
+  out.push(...src.slice(at));
+  return out.join('\n');
+}

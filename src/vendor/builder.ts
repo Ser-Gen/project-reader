@@ -16,6 +16,7 @@ import type {
   SessionInfo,
   TokenFacts,
   Vendor,
+  Widget,
 } from '../model/canon.js';
 import { estTokens, type Calibration, type CalSample, type ContentClass } from '../metrics/estimate.js';
 import { oneLine } from './text.js';
@@ -67,6 +68,7 @@ export interface AddSpec {
   /** content class for token estimation; defaults from `format` */
   cls?: ContentClass;
   images?: ImageRef[];
+  widgets?: Widget[];
   collapsed?: boolean;
   chips?: string[];
   op?: OpFacts;
@@ -90,6 +92,7 @@ export interface ResultSpec {
   cls?: ContentClass;
   chips?: string[];
   images?: ImageRef[];
+  widgets?: Widget[];
   status: OpFacts['status'];
   exitCode?: number;
   linesAdded?: number;
@@ -224,6 +227,7 @@ export class Builder {
       fullLen: clipped.fullLen,
       chips: spec.chips?.length ? spec.chips : undefined,
       images: spec.images?.length ? spec.images : undefined,
+      widgets: spec.widgets?.length ? spec.widgets : undefined,
       collapsed: spec.collapsed,
       est: estimateHeight(spec.kind, clipped.body, spec.images),
     };
@@ -260,6 +264,7 @@ export class Builder {
     if (res.linesAdded !== undefined) ev.op.linesAdded = res.linesAdded;
     if (res.linesRemoved !== undefined) ev.op.linesRemoved = res.linesRemoved;
     ev.tokens.payloadOut = res.payloadOut ?? this.est(res.text, res.cls ?? DEFAULT_CLASS[res.format]);
+    if (res.widgets?.length) ev.widgets = res.widgets;
     if (res.images?.length) {
       ev.images = res.images;
       // a screenshot *is* the result — showing it beats a row you have to open

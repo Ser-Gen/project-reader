@@ -144,10 +144,27 @@ export interface CanonEvent {
   /** small cheap extras rendered as chips */
   chips?: string[];
   images?: ImageRef[];
+  /** pages the agent rendered for the human (see `Widget`) */
+  widgets?: Widget[];
   /** default-collapsed rows (reasoning, huge tool output) */
   collapsed?: boolean;
   /** estimated height in px, refined by measurement once mounted */
   est: number;
+}
+
+/**
+ * A page the agent produced *for the human* and asked its host to display —
+ * Codex's `visualize` skill writes an HTML file and refers to it from the
+ * message text. The bytes are in the transcript, so the reader can show what
+ * the human was actually shown.
+ */
+export interface Widget {
+  kind: string;
+  title: string;
+  /** the file the agent wrote, for the row head */
+  path: string;
+  /** the document as it stood when this event referred to it */
+  html: string;
 }
 
 export interface Segment {

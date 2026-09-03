@@ -62,6 +62,36 @@ export function msHuman(ms: number): string {
   return `${Math.floor(ms / 3_600_000)}h${String(Math.round((ms % 3_600_000) / 60_000)).padStart(2, '0')}m`;
 }
 
+/**
+ * A page the agent wrote and asked its host to display.
+ *
+ * It is rendered, because a visualization *is* the answer the human was given
+ * — the same reason a screenshot row opens by default. It is rendered inside a
+ * fully restricted `sandbox`, so the agent's markup and styling appear and its
+ * scripts, forms and navigation do not run: this is a transcript reader, and
+ * nothing in a transcript gets to execute here. The small preamble makes the
+ * page inherit the reader's dark scheme, which is what `light-dark()` in these
+ * documents is written against.
+ */
+const FRAME_HEAD =
+  '<meta charset="utf-8"><style>:root{color-scheme:dark}' +
+  'body{margin:0;padding:12px;background:#0f1115;color:#dfe4ee;' +
+  'font:13px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}</style>';
+
+function widget(w: { kind: string; title: string; path: string; html: string }): string {
+  const file = w.path.split('/').pop() ?? w.path;
+  return (
+    `<figure class="viz">` +
+    `<figcaption><span class="vk">${escapeHtml(w.kind)}</span>` +
+    `<span class="vt">${escapeHtml(w.title)}</span>` +
+    `<span class="vf">${escapeHtml(file)}</span></figcaption>` +
+    `<iframe sandbox="" loading="lazy" referrerpolicy="no-referrer" title="${escapeHtml(w.title)}"` +
+    ` srcdoc="${escapeHtml(FRAME_HEAD + w.html)}"></iframe>` +
+    `<figcaption class="vn">scripts are not run here</figcaption>` +
+    `</figure>`
+  );
+}
+
 function body(ev: CanonEvent, full: boolean): string {
   const clamp = clampOf(ev);
   const clamped = !full && ev.body.length > clamp;
@@ -83,6 +113,10 @@ function body(ev: CanonEvent, full: boolean): string {
       default:
         html = renderPlain(text);
     }
+  }
+
+  if (ev.widgets?.length) {
+    html += ev.widgets.map(widget).join('');
   }
 
   if (ev.images?.length) {

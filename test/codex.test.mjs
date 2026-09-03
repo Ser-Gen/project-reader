@@ -126,5 +126,26 @@ test('the item stream turns a single-tool rollout into real operations', async (
   }
 
   assert.equal(metrics.time.thinkMs.provenance, 'reported', 'Codex timed its own turns');
+
+  // The `visualize` skill writes HTML into its own directory and points at it
+  // from the message text with private-use sentinels. Both halves are handled:
+  // no sentinel reaches a body, the page is rebuilt from the transcript, and
+  // writing it is an operation rather than a change to the project.
+  for (const ev of session.events) {
+    assert.ok(!/[\ue200-\ue20f]/.test(ev.body), `a directive leaked into ${ev.title}`);
+  }
+  const shown = session.events.filter((e) => e.widgets?.length);
+  assert.ok(shown.length >= 3, 'the visualizations are shown where the agent showed them');
+  assert.ok(
+    shown.every((e) => e.widgets.every((w) => w.html.includes('<') && w.title)),
+    'each one is a real document with a title',
+  );
+  const viz = metrics.ops.byName.find((r) => r.key === 'visualize');
+  assert.ok(viz && viz.calls >= 3);
+  assert.equal(viz.category, 'other', 'a page written for the conversation is not a code edit');
+  assert.ok(
+    session.events.filter((e) => e.op?.category === 'edit').every((e) => !/\.codex\/visualizations\//.test(e.op.target)),
+    'and no edit row points inside the scratch directory',
+  );
   t.diagnostic(`plan revisions ${metrics.plan.planRevisions.value}, edits ${edits.length}`);
 });

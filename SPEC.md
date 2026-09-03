@@ -851,6 +851,18 @@ rather than a measurement (two independent fields agree on 0 ms for commands tha
 longer), with the call's wall time standing in; and `ResultSpec` gained `fullText`, so a row can show
 the truncated output the model was given while expand serves the whole of `stdout`.
 
+**A8. A page the agent renders for the human is shown, in a frame that cannot run it.** (§3, §10.2)
+Codex's `visualize` skill writes HTML into `~/.codex/visualizations/<date>/<session>/` and marks the
+place it should appear with `U+E200 name U+E202 {json} U+E201` inside its own message — sentinels that
+render as tofu and a JSON blob anywhere the convention is unknown. `CanonEvent` gained `widgets`: the
+document, rebuilt from the transcript by replaying the first full write and the diffs after it, taken
+as it stood at each mention (the same file is referred to three times here, revised between). It is
+rendered in an `<iframe sandbox="">` with every capability withheld — a transcript reader executes
+nothing from a transcript — and a strict diff applier returns null rather than a plausible
+reconstruction, because a wrong page is worse than none. Writes there are `visualize` operations
+rather than edits: they are artifacts made for the conversation, and counting them put ~260 lines of
+throwaway HTML into the implementation numbers.
+
 ### 14.2 Not implemented
 
 - **Conversation stitching (§8.2).** Sessions are still one file each. Compactions are marked and

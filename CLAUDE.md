@@ -48,6 +48,10 @@ tools/         inspect.mjs, gen-fixture.mjs, scenario.mjs (known-answer fixture)
   events. `codex.ts` prefers those *per call* — if items appeared between a call and its output they
   win, otherwise the script-parsing path runs. Never read content from both channels: messages and
   reasoning arrive on each, and counting them twice doubles every token figure.
+- **Codex hides directives in private-use characters.** `U+E200 visualize U+E202 {json} U+E201` inside
+  message text means "render this page here". `parseWidgets` lifts them out where the reader can act
+  on them; `flattenWidgets` makes them readable everywhere else (a skill's own docs quoted back in
+  command output). Never let one reach a body — it prints as tofu.
 - **The `ask` body format is a line protocol split across two files** — `encodeAsk` in
   `vendor/text.ts`, `decodeAsk`/`renderAsk` in `view/ask.ts`. They must stay in step; a round-trip
   test in `test/parser.test.mjs` is the guard. `encodeAsk` takes either an answers map keyed by
