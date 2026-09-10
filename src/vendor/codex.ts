@@ -22,6 +22,7 @@
 import type {
   BodyFormat,
   CanonSession,
+  ThreadInfo,
   ImageRef,
   OpCategory,
   OpFacts,
@@ -38,6 +39,11 @@ import {
   asText,
   type AskQuestion,
   encodeAsk,
+  parseReviewPrompt,
+  parseVerdict,
+  quotedRange,
+  quotedText,
+  type ReviewRequest,
   flattenWidgets,
   parseWidgets,
   basename,
@@ -283,6 +289,14 @@ interface PendingItem {
 const ITEM_BLOCK = 10;
 
 /**
+ * Blocks for the two halves of a review prompt. Both come out of one record, so
+ * expanding either has to re-derive its own half rather than hand back the
+ * whole message.
+ */
+const REVIEW_ACTION = 20;
+const REVIEW_QUOTE = 21;
+
+/**
  * A duration, in milliseconds, or nothing.
  *
  * Codex reports 0 for most command items — two independent fields agree on it,
@@ -450,10 +464,64 @@ export function itemRows(it: any, rel: (p: string) => string = (p) => p): ItemRo
   return [];
 }
 
+/**
+ * What kind of thread this file holds.
+ *
+ * Codex says so itself: an ordinary session is `thread_source: "user"`, while a
+ * thread spawned to watch one carries `source.subagent` and, decisively, a
+ * `session_id` that is *the parent's* id. A file like that is not a session —
+ * its prompts were written by the runtime and its subject lives elsewhere — and
+ * a reader that does not say so is showing a conversation that never happened.
+ */
+function threadOf(p: any): ThreadInfo | undefined {
+  const kindOf = (v: unknown): string => {
+    if (typeof v === 'string') return v;
+    if (v && typeof v === 'object') {
+      const inner = Object.values(v as Record<string, unknown>)[0];
+      return typeof inner === 'string' ? inner : kindOf(inner);
+    }
+    return '';
+  };
+  const source = p?.source;
+  const sub = source && typeof source === 'object' ? kindOf(source) : '';
+  const kind = String(p?.thread_source ?? (sub ? `subagent:${sub}` : 'user'));
+  const parent = p?.parent_thread_id ? String(p.parent_thread_id) : undefined;
+  if (!sub && !parent && kind === 'user') return undefined;
+  const review = /review|guardian|approval/i.test(kind) || /review|guardian/i.test(sub);
+  const label = sub && review ? `${sub} review` : review ? 'review' : sub || 'subagent';
+  return { role: review ? 'review' : 'subagent', kind, label, parentId: parent };
+}
+
+/** "exec_command \u00b7 curl -sS \u2026" — how one planned action is announced. */
+function reviewHead(req: ReviewRequest): string {
+  const what = req.command
+    ? commandHead(req.command)
+    : req.files?.length
+      ? req.files.map(basename).join(', ')
+      : (req.patch ?? '').slice(0, 60).replace(/\s+/g, ' ').trim();
+  return what ? `${req.tool} \u00b7 ${what}` : req.tool;
+}
+
+/** The planned action as the row shows it: what would run, where, and why. */
+function reviewBody(req: ReviewRequest): string {
+  const out: string[] = [];
+  out.push(`**${req.tool}**${req.cwd ? ` in \`${req.cwd}\`` : ''}`);
+  if (req.escalated) out.push('Asks for permissions beyond the sandbox.');
+  if (req.command) out.push('```sh\n' + req.command + '\n```');
+  if (req.patch) out.push('```diff\n' + req.patch + '\n```');
+  else if (req.files?.length) out.push(req.files.map((f) => `- \`${f}\``).join('\n'));
+  if (req.justification) out.push(`> ${req.justification.replace(/\n/g, '\n> ')}`);
+  return out.join('\n\n');
+}
+
 /** Codex writes the result body itself; there is nothing to rebuild. */
 export function fullBody(rec: any, src: EventSource): string {
   const p = rec?.payload;
   if (!p) return asText(rec);
+  if (src.block === REVIEW_ACTION || src.block === REVIEW_QUOTE) {
+    const req = parseReviewPrompt(messageText(p));
+    if (req) return src.block === REVIEW_QUOTE ? quotedText(req.quoted) : reviewBody(req);
+  }
   if (p.type === 'item_completed' && src.block >= ITEM_BLOCK) {
     const row = itemRows(p.item)[src.block - ITEM_BLOCK];
     return row ? (row.fullText ?? row.text) : '';
@@ -488,6 +556,8 @@ export class CodexAdapter {
   private asked = new Map<string, AskQuestion[]>();
   private sawItems = false;
   private limits: any;
+  /** the action the guardian is currently judging, for its verdict row */
+  private reviewing = '';
 
   constructor(id: string, name: string, bytes: number, confidence: number, cal: Calibration = {}) {
     this.b = new Builder(id, name, bytes, 'codex', confidence, cal);
@@ -502,6 +572,7 @@ export class CodexAdapter {
 
     if (type === 'session_meta' || type === 'turn_context') {
       const info = this.b.info;
+      if (type === 'session_meta') info.thread = threadOf(p);
       if (p.cwd && !info.cwd) info.cwd = p.cwd;
       if (p.id && !info.sessionId) info.sessionId = String(p.id);
       if (p.model) info.model = String(p.model);
@@ -559,6 +630,29 @@ export class CodexAdapter {
         // `developer` is the IDE's own context, not something a human wrote:
         // counting it as a prompt would split the session into phantom turns.
         const dev = p.role === 'developer' || p.role === 'system';
+        // The environment block is injected by the runtime under the user's
+        // role. It is the same kind of thing as a `developer` message, and
+        // treating it as a turn opens a segment nobody asked for.
+        if (human && /^<environment_context>/.test(text.trimStart())) {
+          this.b.add(
+            {
+              kind: 'notice',
+              ts,
+              tsSource,
+              title: 'environment',
+              subtitle: p.cwd ? String(p.cwd) : this.b.info.cwd,
+              text,
+              format: 'text',
+              cls: 'terminal',
+              collapsed: true,
+              id: p.id,
+            },
+            { start, end, block: 0 },
+          );
+          return;
+        }
+        if (human && this.review(text, ts, tsSource, start, end)) return;
+        if (!human && !dev && this.verdict(text, ts, tsSource, start, end)) return;
         if (human) this.b.openSegment(text, ts);
         this.lastEventIdx = this.b.add(
           {
@@ -623,6 +717,85 @@ export class CodexAdapter {
         this.b.addSystem(t, '', ts, start, end);
       }
     }
+  }
+
+  /**
+   * A guardian's prompt is two things stapled together: the action it has to
+   * judge, and a quote of the parent session as the evidence for judging it.
+   * They become two rows — the action, which is the point of the turn, and a
+   * collapsed quote, which is another session's log and is never promoted into
+   * events of our own. The split is disjoint, so what the reviewer was charged
+   * for is the sum of the two rows rather than the same text counted twice.
+   */
+  private review(text: string, ts: number, tsSource: any, start: number, end: number): boolean {
+    if (this.b.info.thread?.role !== 'review') return false;
+    const req = parseReviewPrompt(text);
+    if (!req) return false;
+    const head = reviewHead(req);
+    this.b.openSegment(head, ts);
+    this.reviewing = head;
+    this.lastEventIdx = this.b.add(
+      {
+        kind: 'prompt',
+        ts,
+        tsSource,
+        title: 'review request',
+        subtitle: head,
+        text: reviewBody(req),
+        format: 'md',
+        cls: 'prose',
+        chips: req.escalated ? ['asks to leave the sandbox'] : undefined,
+      },
+      { start, end, block: REVIEW_ACTION },
+    );
+    if (req.quoted.length) {
+      const chips = [`${req.quoted.length} entries`];
+      if (req.omitted) chips.push('entries omitted by the runtime');
+      this.b.add(
+        {
+          kind: 'notice',
+          ts,
+          tsSource,
+          title: 'quoted from the reviewed session',
+          subtitle: `${quotedRange(req.quoted)}${req.parentId ? ` of session ${req.parentId.slice(0, 8)}\u2026` : ''}`,
+          text: quotedText(req.quoted),
+          format: 'text',
+          cls: 'terminal',
+          collapsed: true,
+          chips,
+        },
+        { start, end, block: REVIEW_QUOTE },
+      );
+    }
+    return true;
+  }
+
+  /** The guardian answers in JSON; the row says what it decided, and why. */
+  private verdict(text: string, ts: number, tsSource: any, start: number, end: number): boolean {
+    if (this.b.info.thread?.role !== 'review') return false;
+    const fact = parseVerdict(text);
+    if (!fact) return false;
+    if (this.reviewing) fact.subject = this.reviewing;
+    const chips: string[] = [];
+    if (fact.risk) chips.push(`risk ${fact.risk}`);
+    if (fact.authorization) chips.push(`authorization ${fact.authorization}`);
+    this.lastEventIdx = this.b.add(
+      {
+        kind: 'text',
+        ts,
+        tsSource,
+        title: fact.outcome,
+        subtitle: fact.subject,
+        text: fact.rationale || text,
+        format: 'md',
+        cls: 'prose',
+        chips,
+        review: fact,
+      },
+      { start, end, block: 0 },
+    );
+    this.reviewing = '';
+    return true;
   }
 
   /** Cumulative counters -> per-request usage. */

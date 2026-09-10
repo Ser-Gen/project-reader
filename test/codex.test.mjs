@@ -59,7 +59,13 @@ for (const name of rollouts) {
     assert.equal(detectFromText(readFileSync(ROOT + name, 'utf8').slice(0, 64 * 1024)).vendor, 'codex');
     assert.equal(adapter.b.info.badLines, 0, 'every line is JSON');
     assert.ok(session.events.length > 50);
-    assert.ok(metrics.ops.totals.calls > 0, 'a session that ran nothing is not a session');
+    // A thread that reviews another agent runs nothing of its own; every other
+    // rollout that ran nothing is a rollout that failed to parse.
+    if (session.info.thread?.role === 'review') {
+      assert.ok(metrics.review.detected, 'a review thread is read for its decisions instead');
+    } else {
+      assert.ok(metrics.ops.totals.calls > 0, 'a session that ran nothing is not a session');
+    }
 
     const walk = (v, path = '') => {
       if (typeof v === 'number') assert.ok(Number.isFinite(v), `${path} is ${v}`);
@@ -72,7 +78,10 @@ for (const name of rollouts) {
     assert.ok(busy.value <= active.value + 1, `busy ${busy.value} <= active ${active.value}`);
     assert.ok(active.value <= wall.value, `active ${active.value} <= wall ${wall.value}`);
 
+    // Nothing quoted out of another session's log may leak into this one's
+    // events: what it says happened is evidence, not something we observed.
     for (const ev of session.events) {
+      if (ev.kind === 'op') assert.ok(!/^>>> (TRANSCRIPT|APPROVAL)/m.test(ev.body));
       if (ev.kind !== 'op') continue;
       assert.ok(ev.op.name, 'an operation without a name is not one');
       assert.ok(ev.op.status !== undefined);
@@ -148,4 +157,47 @@ test('the item stream turns a single-tool rollout into real operations', async (
     'and no edit row points inside the scratch directory',
   );
   t.diagnostic(`plan revisions ${metrics.plan.planRevisions.value}, edits ${edits.length}`);
+});
+
+test('a guardian rollout reads as the review it is', async (t) => {
+  const name = rollouts.find((f) => f.includes('2026-09-10'));
+  if (!name) return t.skip('the guardian rollout is not present');
+  const { session, metrics } = await parse(name);
+
+  // The file says so itself, and it is the reason nothing else here adds up:
+  // `session_id` is the *parent's* id, and the prompts came from the runtime.
+  assert.equal(session.info.thread.role, 'review');
+  assert.equal(session.info.thread.label, 'guardian review');
+  assert.ok(session.info.thread.parentId);
+  assert.notEqual(session.info.thread.parentId, session.info.sessionId);
+
+  assert.equal(metrics.ops.totals.calls, 0, 'a reviewer runs no tools');
+  assert.equal(metrics.review.detected, true);
+  assert.equal(metrics.review.assessments.value, metrics.prompts, 'every request was answered');
+  assert.equal(metrics.review.unanswered.value, 0);
+  assert.ok(metrics.review.medianMs.value > 0);
+  assert.ok(metrics.review.byRisk.length > 0);
+
+  for (const v of metrics.review.verdicts) {
+    assert.ok(v.outcome, 'a verdict says what it decided');
+    assert.ok(v.rationale.length > 20, 'and why');
+    assert.ok(v.subject, 'and what it was deciding about');
+    assert.ok(['allow', 'block', 'ask', 'other'].includes(v.decision));
+  }
+
+  // The action is the row; the quoted parent transcript is a separate,
+  // collapsed row that never becomes events of our own.
+  const requests = session.events.filter((e) => e.kind === 'prompt');
+  assert.ok(requests.every((e) => e.title === 'review request' && e.subtitle));
+  const quotes = session.events.filter((e) => e.title === 'quoted from the reviewed session');
+  assert.equal(quotes.length, requests.length);
+  assert.ok(quotes.every((e) => e.collapsed && /^entries \d+–\d+ of session /.test(e.subtitle)));
+  assert.ok(
+    !session.events.some((e) => e.kind === 'prompt' && /TRANSCRIPT (DELTA )?START/.test(e.body)),
+    'no row is the raw machine prompt again',
+  );
+  t.diagnostic(
+    `${metrics.review.assessments.value} assessments, ` +
+      `${metrics.review.allowed.value} allowed, median ${metrics.review.medianMs.value}ms`,
+  );
 });

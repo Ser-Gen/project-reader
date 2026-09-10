@@ -6,10 +6,22 @@
 import type { SessionMetrics } from '../../model/metrics.js';
 import { escapeHtml } from '../markdown.js';
 import { bar, empty, plain, section, stat, tokensHuman } from './fmt.js';
+import { reviewNote } from './review.js';
 
 export function renderOverview(m: SessionMetrics): string {
   const t = m.tokens;
   const q = m.quality;
+
+  const thread = m.thread
+    ? section(
+        m.thread.role === 'review' ? 'review thread' : 'subagent thread',
+        plain('role', m.thread.label) +
+          (m.thread.parentId ? plain('serves session', m.thread.parentId) : '') +
+          (m.review.detected ? plain('decisions', reviewNote(m.review)) : '') +
+          `<div class="dnote">This file is one side of a conversation held in another file. Its prompts were ` +
+          `composed by the runtime, so "prompts" here counts requests put to it, not things a person typed.</div>`,
+      )
+    : '';
 
   const tokens = section(
     'tokens',
@@ -35,6 +47,13 @@ export function renderOverview(m: SessionMetrics): string {
       `<div class="dnote">Busy is the union of operation intervals: parallel calls count once.</div>`,
   );
 
+  // A thread that judges another agent runs no tools; saying why the table is
+  // empty is worth more than an empty table.
+  const noOps =
+    m.thread?.role === 'review'
+      ? empty('A review thread runs no operations of its own — it reads and decides. See the review tab.')
+      : empty('no operations were recorded');
+
   const cats = m.ops.byCategory.length
     ? `<div class="cats">${m.ops.byCategory
         .map(
@@ -43,7 +62,7 @@ export function renderOverview(m: SessionMetrics): string {
             `<b>${r.calls}</b><span>${escapeHtml(r.key)}</span></button>`,
         )
         .join('')}</div>`
-    : empty('no operations were recorded');
+    : noOps;
 
   const ops = section(
     'operations',
@@ -106,5 +125,5 @@ export function renderOverview(m: SessionMetrics): string {
       plain('duration coverage', `${Math.round(q.coverage.durations * 100)}%`),
   );
 
-  return tokens + clocks + ops + phases + plan + improvements + quality;
+  return thread + tokens + clocks + ops + phases + plan + improvements + quality;
 }

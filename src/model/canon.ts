@@ -112,6 +112,22 @@ export interface PlanArtifact {
   partial?: boolean;
 }
 
+/**
+ * One assessment by a reviewing thread: a model judging whether the session it
+ * watches may take the action it just planned. `decision` is normalized so that
+ * metrics never have to know a vendor's vocabulary; `outcome` keeps the word the
+ * vendor actually used, because that is what the row should say.
+ */
+export interface ReviewFact {
+  decision: 'allow' | 'block' | 'ask' | 'other';
+  outcome: string;
+  risk?: string;
+  authorization?: string;
+  rationale?: string;
+  /** the action that was judged, one line: "exec_command · curl …" */
+  subject?: string;
+}
+
 export interface CanonEvent {
   idx: number;
   id: string;
@@ -133,6 +149,8 @@ export interface CanonEvent {
   op?: OpFacts;
   /** set by the adapter when this event emitted (or opened) a plan */
   plan?: PlanArtifact;
+  /** set on the event that delivered a reviewer's verdict */
+  review?: ReviewFact;
   tokens: TokenFacts;
   /** 0 = main thread, >=1 = subagent nesting depth */
   sidechain: number;
@@ -188,6 +206,22 @@ export interface Segment {
   ttftMs?: number;
 }
 
+/**
+ * Which conversation this file *is*. A transcript is not always a session: an
+ * agent that reviews another agent writes its own rollout, whose prompts are
+ * machine-composed and whose parent lives in a file the reader does not have.
+ * Saying so is the difference between "renders strangely" and "reads correctly".
+ */
+export interface ThreadInfo {
+  role: 'main' | 'review' | 'subagent';
+  /** the vendor's own word: "guardian_review", "user" */
+  kind: string;
+  /** how to name it to a human: "guardian review" */
+  label: string;
+  /** the thread this one serves — another file, which may not be loaded */
+  parentId?: string;
+}
+
 export interface SessionInfo {
   id: string;
   name: string;
@@ -195,6 +229,8 @@ export interface SessionInfo {
   vendor: Vendor;
   /** how sure detection was, 0..1 */
   confidence: number;
+  /** absent means an ordinary session; set when the file is a dependent thread */
+  thread?: ThreadInfo;
   sessionId?: string;
   cwd?: string;
   gitBranch?: string;

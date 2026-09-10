@@ -12,6 +12,7 @@ import type {
   CanonSession,
   ImageRef,
   OpFacts,
+  ReviewFact,
   Segment,
   SessionInfo,
   TokenFacts,
@@ -72,6 +73,7 @@ export interface AddSpec {
   collapsed?: boolean;
   chips?: string[];
   op?: OpFacts;
+  review?: ReviewFact;
   tokens?: TokenFacts;
   sidechain?: number;
   id?: string;
@@ -217,6 +219,7 @@ export class Builder {
       durationSource: 'unknown',
       seg: Math.max(0, this.segments.length - 1),
       op: spec.op,
+      review: spec.review,
       tokens,
       sidechain: spec.sidechain ?? 0,
       title: spec.title,

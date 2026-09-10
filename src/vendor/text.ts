@@ -3,6 +3,8 @@
  * under `node --test`.
  */
 
+import type { ReviewFact } from '../model/canon.js';
+
 // CSI escape sequences from terminal output captured in shell results.
 const ANSI = /\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b\][^\u0007]*\u0007/g;
 
@@ -358,4 +360,138 @@ export function applyUnifiedDiff(text: string, diff: string): string | null {
   }
   out.push(...src.slice(at));
   return out.join('\n');
+}
+
+/* ------------------------------------------------------------------ *
+ * Review threads
+ *
+ * A guardian thread is prompted by its runtime, not by a human: each turn
+ * quotes a slice of the *parent* session's transcript and then states the one
+ * action it wants judged. Rendering that message as a prompt shows a 37 KB wall
+ * of someone else's log under the heading "You". Splitting it into the action
+ * (which is the point) and the quoted context (which is evidence) is the whole
+ * of the fix — and nothing quoted is ever promoted into an event, because those
+ * things happened in a file this reader has not seen.
+ * ------------------------------------------------------------------ */
+
+/** One numbered entry lifted out of the quoted parent transcript. */
+export interface QuotedEntry {
+  /** the parent's own event number */
+  n: number;
+  /** "user", "assistant", "tool exec call", "tool exec result" */
+  kind: string;
+  text: string;
+}
+
+export interface ReviewRequest {
+  /** the tool the parent asked to run: "exec_command", "apply_patch" */
+  tool: string;
+  command?: string;
+  patch?: string;
+  files?: string[];
+  cwd?: string;
+  /** the parent agent's own words for why it wants this */
+  justification?: string;
+  /** the action asked for permissions beyond the sandbox */
+  escalated?: boolean;
+  /** the session being reviewed; it lives in another file */
+  parentId?: string;
+  quoted: QuotedEntry[];
+  /** the runtime said it dropped entries from the quote */
+  omitted: boolean;
+}
+
+const TRANSCRIPT_START = /^>>> TRANSCRIPT (?:DELTA )?START$/m;
+const TRANSCRIPT_END = /^>>> TRANSCRIPT (?:DELTA )?END$/m;
+const ENTRY = /^\[(\d+)\] ([a-z][a-z ]*):[ \t]?(.*)$/;
+
+/**
+ * Read one guardian prompt. Returns null for anything that is not one, so the
+ * ordinary path stays untouched: this must never reshape a human's message.
+ */
+export function parseReviewPrompt(text: string): ReviewRequest | null {
+  const open = TRANSCRIPT_START.exec(text);
+  const close = TRANSCRIPT_END.exec(text);
+  if (!open || !close || close.index < open.index) return null;
+
+  const quoted: QuotedEntry[] = [];
+  const body = text.slice(open.index + open[0].length, close.index);
+  for (const line of body.split('\n')) {
+    const head = ENTRY.exec(line);
+    if (head) quoted.push({ n: Number(head[1]), kind: head[2].trim(), text: head[3] });
+    else if (quoted.length) quoted[quoted.length - 1].text += '\n' + line;
+    // Text before the first entry is the runtime's own framing; it is dropped.
+  }
+  for (const e of quoted) e.text = e.text.trim();
+
+  const tail = text.slice(close.index + close[0].length);
+  const req: ReviewRequest = {
+    tool: 'action',
+    quoted,
+    omitted: /entries were omitted/i.test(tail),
+    parentId: /session id:\s*(\S+)/i.exec(tail)?.[1],
+  };
+
+  const json = /Planned action JSON:\s*\n([\s\S]*?)(?:\n>>>|$)/.exec(tail);
+  if (json) {
+    try {
+      const a = JSON.parse(json[1]) as Record<string, unknown>;
+      if (typeof a.tool === 'string') req.tool = a.tool;
+      req.command = Array.isArray(a.command)
+        ? // ["/bin/zsh","-lc","…"] — the shell wrapper is noise, the script is not
+          asText(a.command[a.command.length - 1])
+        : typeof a.command === 'string'
+          ? a.command
+          : undefined;
+      if (typeof a.patch === 'string') req.patch = a.patch;
+      if (Array.isArray(a.files)) req.files = a.files.map(asText).filter(Boolean);
+      if (typeof a.cwd === 'string') req.cwd = a.cwd;
+      if (typeof a.justification === 'string') req.justification = a.justification;
+      if (typeof a.sandbox_permissions === 'string') req.escalated = /escalat/i.test(a.sandbox_permissions);
+    } catch {
+      // A planned action we cannot read still leaves a reviewable request.
+    }
+  }
+  return req;
+}
+
+/** "entries 1–58" — which slice of the parent's log this is. */
+export function quotedRange(quoted: readonly QuotedEntry[]): string {
+  if (!quoted.length) return 'nothing quoted';
+  return `entries ${quoted[0].n}–${quoted[quoted.length - 1].n}`;
+}
+
+/** The quoted entries as one escaped, monospace block — never as events. */
+export function quotedText(quoted: readonly QuotedEntry[]): string {
+  return quoted.map((e) => `[${e.n}] ${e.kind}\n${e.text}`).join('\n\n');
+}
+
+/**
+ * A guardian answers in JSON. When it does, the row should say `allow` and carry
+ * the reasoning as prose; when it does not, the message is left exactly alone.
+ */
+export function parseVerdict(text: string): ReviewFact | null {
+  const t = text.trim();
+  if (!t.startsWith('{') || !t.endsWith('}')) return null;
+  let raw: Record<string, unknown>;
+  try {
+    raw = JSON.parse(t) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const outcome = typeof raw.outcome === 'string' ? raw.outcome : '';
+  if (!outcome) return null;
+  const fact: ReviewFact = { decision: decisionOf(outcome), outcome };
+  if (typeof raw.risk_level === 'string') fact.risk = raw.risk_level;
+  if (typeof raw.user_authorization === 'string') fact.authorization = raw.user_authorization;
+  if (typeof raw.rationale === 'string') fact.rationale = raw.rationale;
+  return fact;
+}
+
+function decisionOf(outcome: string): ReviewFact['decision'] {
+  const o = outcome.toLowerCase();
+  if (/allow|approve|permit/.test(o)) return 'allow';
+  if (/block|deny|reject|refuse/.test(o)) return 'block';
+  if (/ask|escalat|confirm|prompt/.test(o)) return 'ask';
+  return 'other';
 }

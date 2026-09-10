@@ -606,6 +606,20 @@ img.shot {
   border-left: 1px solid var(--line);
 }
 
+.threadbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 20px;
+  background: color-mix(in srgb, var(--c-thinking) 14%, transparent);
+  border-bottom: 1px solid var(--line);
+  font: 11.5px var(--mono);
+  color: var(--fg-dim);
+}
+.threadbar[hidden] { display: none; }
+.threadbar b { color: var(--fg); }
+.threadbar code { color: var(--fg); font: inherit; }
+
 .pinbar {
   display: flex;
   align-items: center;
@@ -759,13 +773,13 @@ img.shot {
 .qbadge.warn { color: var(--warn); border: 1px solid color-mix(in srgb, var(--warn) 40%, var(--line)); }
 
 /* tables */
-.otab, .ptab, .itab, .ctab {
+.otab, .ptab, .itab, .ctab, .rtab {
   width: 100%;
   border-collapse: collapse;
   font: 11.5px var(--mono);
   table-layout: auto;
 }
-.otab th, .ptab th, .itab th, .ctab th {
+.otab th, .ptab th, .itab th, .ctab th, .rtab th {
   text-align: left;
   font-weight: 500;
   color: var(--fg-faint);
@@ -776,13 +790,23 @@ img.shot {
   background: var(--bg-2);
   cursor: pointer;
 }
-.otab td, .ptab td, .itab td, .ctab td {
+.otab td, .ptab td, .itab td, .ctab td, .rtab td {
   padding: 3px 4px;
   border-bottom: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
   vertical-align: top;
 }
-.otab .n, .ptab .n, .itab .n, .ctab .n { text-align: right; white-space: nowrap; }
+.otab .n, .ptab .n, .itab .n, .ctab .n, .rtab .n { text-align: right; white-space: nowrap; }
 .otab .nm, .ctab .nm, .itab .nm { max-width: 190px; overflow: hidden; text-overflow: ellipsis; }
+.rtab th { cursor: default; }
+.rrow { cursor: pointer; }
+.rrow:hover { background: var(--bg-3); }
+.rrow .rw { color: var(--fg-dim); max-width: 320px; }
+/* an outcome is the point of the row: colour it like a status, not like text */
+.rtab .d-allow { color: var(--c-bash); }
+.rtab .d-block { color: var(--c-error); }
+.rtab .d-ask { color: var(--c-edit); }
+.rtab .d-other { color: var(--fg-dim); }
+
 .orow { cursor: pointer; }
 .orow:hover { background: var(--bg-3); }
 .orow.d1 .nm { padding-left: 14px; color: var(--fg-dim); }

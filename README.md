@@ -263,6 +263,17 @@ test/
   implementation end and unplanned work. They appear as `visualize` operations instead.
 - **Codex reasoning carries no readable text** — encrypted in one format, empty in the other. The
   session says so rather than looking as though it never thought.
+- **Some Codex rollouts are not sessions.** A *guardian* thread — the reviewer that decides whether the
+  session it watches may run the action it just planned — writes a rollout of its own, and says so in
+  its header: `thread_source: "guardian_review"`, a `parent_thread_id`, and a `session_id` that is the
+  parent's rather than its own. Its prompts were written by the runtime, each quoting a slice of the
+  parent's transcript, and it runs no tools at all — so read as an ordinary session it is a wall of
+  identical prompts attributed to you and an empty analytics dock. The reader names it in a strip above
+  the timeline, says which session it reviews and offers to open that file when you have it, and splits
+  each machine prompt into the action being judged and a collapsed quote of the parent's log. Nothing
+  quoted becomes an event: it happened in a file this reader has not seen. What such a thread does have
+  is decisions, and they get their own tab — how many assessments, which way each went, the risk the
+  reviewer assigned, and how long it took to answer.
 - **Cursor** records no token usage at all and often no per-message timestamps, so its token figures
   are estimated, its durations are mostly unavailable, and its busy clock does not exist. Its schema
   is undocumented and moves between versions; both adapters are labelled experimental until they have

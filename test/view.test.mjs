@@ -16,6 +16,7 @@ import { renderOps, defaultOpsView } from '../src/view/dock/ops.ts';
 import { renderPhases } from '../src/view/dock/phases.ts';
 import { renderPlan } from '../src/view/dock/plan.ts';
 import { renderQuality } from '../src/view/dock/quality.ts';
+import { renderReview } from '../src/view/dock/review.ts';
 import { renderCompare } from '../src/view/dock/compare.ts';
 import { value } from '../src/view/dock/fmt.ts';
 import { renderRow, msHuman, tokensHuman } from '../src/view/rows.ts';
@@ -37,6 +38,39 @@ function analyze(records, options = {}) {
 }
 
 const { session, metrics } = analyze(scenarioRecords());
+
+/**
+ * A review thread's panel, built by hand: the scenario fixture is a coding
+ * session, and this panel exists precisely for the transcripts that are not one.
+ */
+const reviewMetrics = {
+  ...metrics,
+  thread: { role: 'review', kind: 'guardian_review', label: 'guardian review', parentId: 'parent-1' },
+  review: {
+    detected: true,
+    verdicts: [
+      {
+        idx: 3,
+        ts: 1,
+        decision: 'block',
+        outcome: 'reject',
+        risk: 'high',
+        authorization: 'low',
+        rationale: 'Deletes <script>alert(1)</script> without being asked.',
+        subject: 'exec_command · rm',
+        ms: 4200,
+      },
+      { idx: 5, ts: 2, decision: 'allow', outcome: 'allow', rationale: 'Narrow edit.', ms: null },
+    ],
+    assessments: { value: 2, provenance: 'reported' },
+    allowed: { value: 1, provenance: 'reported' },
+    blocked: { value: 1, provenance: 'reported' },
+    escalated: { value: 0, provenance: 'reported' },
+    unanswered: { value: 0, provenance: 'derived' },
+    medianMs: { value: 4200, provenance: 'derived', coverage: 0.5 },
+    byRisk: [{ key: 'high', n: 1 }, { key: 'unstated', n: 1 }],
+  },
+};
 const { metrics: noPlan } = analyze(scenarioRecords(), { planSource: 'none' });
 
 const panels = () => [
@@ -45,6 +79,8 @@ const panels = () => [
   ['phases', renderPhases(metrics.phases)],
   ['plan', renderPlan(metrics.plan, metrics.improvements)],
   ['quality', renderQuality(metrics.quality)],
+  ['review (ordinary session)', renderReview(metrics)],
+  ['review', renderReview(reviewMetrics)],
   ['compare', renderCompare(metrics, noPlan, [{ id: 'f2', title: 'other' }])],
   ['overview (no plan)', renderOverview(noPlan)],
   ['phases (no plan)', renderPhases(noPlan.phases)],
@@ -151,4 +187,20 @@ test('human-readable numbers stay readable at every scale', () => {
   assert.equal(msHuman(1500), '1.5s');
   assert.equal(msHuman(65_000), '1m05s');
   assert.equal(msHuman(3_700_000), '1h02m');
+});
+
+test('a review panel shows the decisions, and a verdict cannot inject markup', () => {
+  const html = renderReview(reviewMetrics);
+  assert.match(html, /guardian review/);
+  assert.match(html, /parent-1/);
+  assert.match(html, /d-block">reject/);
+  assert.match(html, /data-ev="3"/, 'every verdict links back to the timeline');
+  // A verdict that never got paired with its request says so, not "0ms".
+  assert.match(html, /<td class="n">—<\/td>/);
+  assert.ok(!html.includes('<script>alert(1)</script>'), 'transcript text is escaped');
+
+  // An ordinary session gets the panel's honest empty state, not a broken table.
+  const none = renderReview(metrics);
+  assert.match(none, /ordinary session/);
+  assert.ok(!none.includes('<table'));
 });

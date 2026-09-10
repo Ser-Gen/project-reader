@@ -6,10 +6,10 @@
  * look alike. `null` + `unavailable` renders as "—", never as 0.
  */
 
-import type { OpCategory, PlanRevision, Vendor } from './canon.js';
+import type { OpCategory, PlanRevision, ReviewFact, ThreadInfo, Vendor } from './canon.js';
 
 /** Bumped whenever a metric definition changes; invalidates the IndexedDB cache. */
-export const METRICS_SCHEMA_VERSION = 1;
+export const METRICS_SCHEMA_VERSION = 2;
 
 export type Provenance = 'reported' | 'derived' | 'estimated' | 'unavailable';
 
@@ -266,6 +266,40 @@ export interface ImprovementStats {
   churn: { path: string; edits: number }[];
 }
 
+/* ---------------- review threads ---------------- */
+
+export interface ReviewVerdict {
+  idx: number;
+  ts: number;
+  decision: ReviewFact['decision'];
+  outcome: string;
+  risk?: string;
+  authorization?: string;
+  rationale: string;
+  /** the action that was judged */
+  subject?: string;
+  /** request -> verdict; null when the two could not be paired */
+  ms: number | null;
+}
+
+/**
+ * What a thread that judges another agent did. Empty — and `detected: false` —
+ * for every ordinary session, which is most of them.
+ */
+export interface ReviewStats {
+  detected: boolean;
+  verdicts: ReviewVerdict[];
+  assessments: Metric;
+  allowed: Metric;
+  blocked: Metric;
+  /** sent back to a human rather than decided */
+  escalated: Metric;
+  /** requests that never got an answer */
+  unanswered: Metric;
+  medianMs: Metric;
+  byRisk: { key: string; n: number }[];
+}
+
 /* ---------------- quality ---------------- */
 
 export interface QualityReport {
@@ -304,8 +338,12 @@ export interface CalibrationReport {
 export interface SessionMetrics {
   schemaVersion: number;
   vendor: Vendor;
+  /** set when the file is a dependent thread rather than a session of its own */
+  thread?: ThreadInfo;
   key: string;
   title: string;
+  /** the vendor's own id for this conversation, when it records one */
+  sessionId?: string;
   model?: string;
   cwd?: string;
   startTs: number;
@@ -320,6 +358,7 @@ export interface SessionMetrics {
   plan: PlanStats;
   phases: PhaseModel;
   improvements: ImprovementStats;
+  review: ReviewStats;
   quality: QualityReport;
 }
 

@@ -872,6 +872,33 @@ the body text, its clamp, the cost estimate and the expand path are untouched, s
 twice for showing it. Codex takes the argv tail rather than `parsed_cmd[0]`, since the parse splits a
 chain into pieces and only the tail holds the line as written.
 
+**A10. A transcript is not always a session, and the reader has to say so.** (§2, §3, §10.1)
+Codex writes a rollout for its *guardian* thread too: a model that judges each action the session it
+watches wants to take. Nothing about it fits the session shape — its prompts were composed by the
+runtime, each one quoting a slice of the parent's log; it runs no tools at all; and its `session_id`
+is the **parent's** id, with its own id in `id` and `parent_thread_id`. Rendered as a session it is
+seven identical prompts attributed to "You", 37 KB of someone else's log among them, and an empty
+dock. `SessionInfo` gained `thread` (`role`, the vendor's own `kind`, a label, `parentId`), read from
+`session_meta`, and three things follow from it:
+
+- **the dependency is stated, not implied** — a strip above the timeline names the session being
+  reviewed and offers to open that file when it is loaded, and the overview repeats it. It is not a
+  modal: the thread is readable on its own, it only must not be mistaken for the work it discusses;
+- **each machine prompt splits into the action and the evidence** — one row for the planned action
+  (tool, command, cwd, the agent's own justification) and one collapsed row for the quoted parent
+  transcript, kept as escaped monospace text. Nothing quoted becomes an event of ours: those things
+  happened in a file this reader has not seen, and reconstructing operations from a quote would put
+  numbers with no provenance into the tables. The split is disjoint, so the estimate of what entered
+  the reviewer's context is the sum of the two rows and not the same text counted twice;
+- **the verdict is the row** — `CanonEvent.review` carries a normalized `decision`
+  (`allow | block | ask | other`) beside the vendor's own word, its risk and authorization ratings and
+  its rationale, so `metrics/review.ts` aggregates decisions without learning what a guardian is. The
+  dock gains a review tab, shown only for these files, and the operations panel explains that a
+  reviewer runs nothing rather than showing an empty table.
+
+The same `session_meta` reading fixes an ordinary-session bug: `<environment_context>` arrives under
+the user's role and was opening a phantom turn in every v2 rollout. It is a notice now.
+
 ### 14.2 Not implemented
 
 - **Conversation stitching (§8.2).** Sessions are still one file each. Compactions are marked and

@@ -14,6 +14,7 @@ import { computeOps } from './ops.js';
 import { computePhases } from './phases.js';
 import { computePlan } from './plan.js';
 import { computeQuality } from './quality.js';
+import { computeReview } from './review.js';
 import { computeTime } from './time.js';
 import { computeTokens } from './tokens.js';
 
@@ -33,8 +34,10 @@ export function computeMetrics({ session, raw, samples, options }: MetricsInput)
   return {
     schemaVersion: METRICS_SCHEMA_VERSION,
     vendor: info.vendor,
+    thread: info.thread,
     key: info.id,
     title: info.title,
+    sessionId: info.sessionId,
     model: info.model,
     cwd: info.cwd,
     startTs: info.startTs,
@@ -49,6 +52,7 @@ export function computeMetrics({ session, raw, samples, options }: MetricsInput)
     plan,
     phases,
     improvements: computeImprovements(events, segments, plan, phases),
+    review: computeReview(events),
     quality: computeQuality(session, raw, fit),
   };
 }

@@ -60,6 +60,7 @@ const elLightImg = elLightbox.firstElementChild as HTMLImageElement;
 const elDock = $('dock');
 const elDockToggle = $<HTMLButtonElement>('docktoggle');
 const elPin = $('pin');
+const elThread = $('thread');
 const elToast = $('toast');
 const elGutter = $<HTMLCanvasElement>('gutter');
 const elParts = $('parts');
@@ -339,6 +340,7 @@ function show(rec: Loaded): void {
   typeFilter.clear();
   timeline.setFilter(typeFilter);
   timeline.setSession(s);
+  renderThread(s);
   applyMarkers(rec);
   activeSeg = -1;
   renderTypes();
@@ -380,6 +382,35 @@ function renderMeta(rec: Loaded): void {
     s.info.badLines ? `${s.info.badLines} unparsable lines` : '',
   ].filter(Boolean);
   elMeta.innerHTML = parts.map((t) => `<span>${escapeHtml(t)}</span>`).join('');
+}
+
+/**
+ * Some transcripts are not sessions. A thread that reviews another agent has
+ * machine-written prompts and a subject that lives in a file the reader may not
+ * have — so it says which file that is, and offers to open it when it is here.
+ * The strip is not a modal: the thread is readable on its own, it just must not
+ * be mistaken for the conversation it talks about.
+ */
+function renderThread(s: CanonSession): void {
+  const t = s.info.thread;
+  elThread.hidden = !t;
+  if (!t) return;
+  const parent = t.parentId
+    ? [...registry.entries.values()].find(
+        (e) => e.id !== s.info.id && (e.name.includes(t.parentId!) || e.metrics?.sessionId === t.parentId),
+      )
+    : undefined;
+  const what =
+    t.role === 'review'
+      ? `<b>${escapeHtml(t.label)} thread</b> — every prompt below was written by the agent runtime, not by a person. ` +
+        `The work being judged is in another session`
+      : `<b>${escapeHtml(t.label)} thread</b> — this file is part of a larger session`;
+  const where = t.parentId
+    ? parent
+      ? `, <button class="ghost sm" data-open="${escapeHtml(parent.id)}">open ${escapeHtml(parent.name)}</button>`
+      : `: <code>${escapeHtml(t.parentId)}</code>, which is not open here.`
+    : '.';
+  elThread.innerHTML = `<span>${what}${where}</span>`;
 }
 
 /** Phase boundaries, plan revisions and compactions, drawn into the timeline. */
@@ -459,6 +490,12 @@ elParts.addEventListener('change', (e) => {
     options: optionsFor(rec.entry.key),
     part: sel.value,
   } as ToWorker);
+});
+
+elThread.addEventListener('click', (e) => {
+  const id = (e.target as HTMLElement).closest<HTMLElement>('[data-open]')?.dataset.open;
+  const entry = id && registry.get(id);
+  if (entry) void select(entry);
 });
 
 elPin.addEventListener('click', (e) => {

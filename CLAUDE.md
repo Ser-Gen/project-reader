@@ -66,6 +66,11 @@ destroys it.
   events. `codex.ts` prefers those *per call* — if items appeared between a call and its output they
   win, otherwise the script-parsing path runs. Never read content from both channels: messages and
   reasoning arrive on each, and counting them twice doubles every token figure.
+- **A Codex rollout is not always a session.** `session_meta.thread_source` / `source.subagent` mark a
+  *guardian review* thread, and its `session_id` is the **parent's** id while `id` is its own. Those
+  files have machine-written prompts (each quoting the parent's log) and zero tool calls, so an
+  ops-shaped reader shows nothing. `SessionInfo.thread` drives the banner, the review tab and
+  `metrics/review.ts`; nothing quoted out of the parent may become an event of ours.
 - **Codex hides directives in private-use characters.** `U+E200 visualize U+E202 {json} U+E201` inside
   message text means "render this page here". `parseWidgets` lifts them out where the reader can act
   on them; `flattenWidgets` makes them readable everywhere else (a skill's own docs quoted back in

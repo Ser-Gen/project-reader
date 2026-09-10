@@ -13,11 +13,15 @@ import { renderOverview } from './overview.js';
 import { renderPhases } from './phases.js';
 import { renderPlan } from './plan.js';
 import { renderQuality } from './quality.js';
+import { renderReview } from './review.js';
 
-export type DockTab = 'overview' | 'ops' | 'phases' | 'plan' | 'quality' | 'compare';
+export type DockTab = 'overview' | 'review' | 'ops' | 'phases' | 'plan' | 'quality' | 'compare';
 
 const TABS: { key: DockTab; label: string }[] = [
   { key: 'overview', label: 'overview' },
+  // Only ever shown for a thread that reviews another agent; for everything
+  // else it would be a tab that can never say anything.
+  { key: 'review', label: 'review' },
   { key: 'ops', label: 'operations' },
   { key: 'phases', label: 'phases' },
   { key: 'plan', label: 'plan' },
@@ -85,6 +89,8 @@ export class Dock {
     const changedSession = m?.key !== this.metrics?.key;
     this.metrics = m;
     if (changedSession) this.opsView = defaultOpsView();
+    if (this.tab === 'review' && !m?.review.detected) this.tab = 'overview';
+    this.paintTabs();
     this.render();
   }
 
@@ -95,8 +101,10 @@ export class Dock {
   }
 
   private paintTabs(): void {
+    const reviewed = this.metrics?.review.detected ?? false;
     for (const el of this.root.querySelectorAll<HTMLElement>('.dt')) {
       el.classList.toggle('on', el.dataset.tab === this.tab);
+      if (el.dataset.tab === 'review') el.hidden = !reviewed;
     }
   }
 
@@ -110,6 +118,9 @@ export class Dock {
     switch (this.tab) {
       case 'overview':
         this.body.innerHTML = renderOverview(m);
+        break;
+      case 'review':
+        this.body.innerHTML = renderReview(m);
         break;
       case 'ops':
         this.body.innerHTML = renderOps(m.ops, this.opsView);
