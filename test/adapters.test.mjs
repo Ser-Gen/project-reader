@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { ClaudeAdapter, toolBody, fullBody, categoryOf, subgroupOf } from '../src/vendor/claude.ts';
+import { renderRow } from '../src/view/rows.ts';
 import { CodexAdapter, fullBody as codexFullBody, scriptCommands } from '../src/vendor/codex.ts';
 import { CursorAdapter, parseExportedChat, readCursorDb } from '../src/vendor/cursor.ts';
 import { SqliteDb } from '../src/vendor/sqlite.ts';
@@ -386,6 +387,42 @@ test('a codex result body survives the expand path unchanged', () => {
   assert.equal(codexFullBody(record, { start: 0, end: 0, block: 1 }), 'line one\nline two');
 });
 
+test('a shell row keeps the whole command, however little of it fits in the head', () => {
+  const command = 'for p in a b c; do\n  echo "$p"\ndone\necho "--- done ---"';
+  const { session } = run(ClaudeAdapter, [
+    rec({ type: 'assistant', message: { id: 'm1', role: 'assistant', content: [
+      { type: 'tool_use', id: 't1', name: 'Bash', input: { command } },
+    ] } }),
+    rec({ type: 'user', message: { role: 'user', content: [
+      { type: 'tool_result', tool_use_id: 't1', content: 'a\nb\nc' },
+    ] }, toolUseResult: { stdout: 'a\nb\nc', stderr: '' } }),
+  ]);
+  const op = session.events.find((e) => e.op?.name === 'Bash');
+  assert.equal(op.op.command, command, 'the row carries every line of it');
+  // The head is one line of a scrolling list and still says so.
+  assert.equal(op.subtitle, 'for p in a b c; do …');
+  assert.equal(op.body, 'a\nb\nc', 'the body is still the result');
+
+  const html = renderRow(op, true, false);
+  assert.ok(html.includes('class="code cmd"'), 'and the command is drawn above it');
+  assert.ok(html.includes('echo &quot;--- done ---&quot;'), 'including the lines the head dropped');
+  assert.ok(html.indexOf('class="code cmd"') < html.indexOf('a\nb\nc'), 'command first, result after');
+});
+
+test('a row that ran no command gets no command block', () => {
+  const { session } = run(ClaudeAdapter, [
+    rec({ type: 'assistant', message: { id: 'm1', role: 'assistant', content: [
+      { type: 'tool_use', id: 't1', name: 'Read', input: { file_path: '/repo/a.ts' } },
+    ] } }),
+    rec({ type: 'user', message: { role: 'user', content: [
+      { type: 'tool_result', tool_use_id: 't1', content: 'contents' },
+    ] } }),
+  ]);
+  const op = session.events.find((e) => e.op?.name === 'Read');
+  assert.equal(op.op.command, undefined);
+  assert.ok(!renderRow(op, true, false).includes('code cmd'));
+});
+
 /* ---------- codex: the item stream ---------- */
 
 const item = (sec, it, ms = 0) =>
@@ -426,6 +463,8 @@ test('a command item becomes the call it was launched by, with its own facts', (
   assert.equal(op.op.subgroup, 'rg');
   assert.equal(op.subtitle, 'rg -n Tip src');
   assert.equal(op.op.exitCode, 0);
+  // `parsed_cmd` is Codex's reading of the line; the argv tail is the line.
+  assert.equal(op.op.command, 'rg -n Tip src');
   assert.equal(op.durationMs, 51);
   assert.equal(op.durationSource, 'reported');
   // The row shows what the model was handed; the rest is one expand away.

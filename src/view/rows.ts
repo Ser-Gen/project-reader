@@ -92,26 +92,40 @@ function widget(w: { kind: string; title: string; path: string; html: string }):
   );
 }
 
+/**
+ * The command line, above the output it produced.
+ *
+ * The head has to truncate — it is one line of a scrolling list — but a shell
+ * call is often many lines, and the first of them says almost nothing about
+ * what ran. Opening the row shows the whole of it, then what came back.
+ */
+function commandBlock(ev: CanonEvent): string {
+  const cmd = ev.op?.command?.trim();
+  if (!cmd) return '';
+  return `<pre class="code cmd">${escapeHtml(cmd)}</pre>`;
+}
+
 function body(ev: CanonEvent, full: boolean): string {
   const clamp = clampOf(ev);
   const clamped = !full && ev.body.length > clamp;
   const text = clamped ? ev.body.slice(0, clamp) : ev.body;
-  if (!text && !ev.images?.length) return '';
+  const cmd = commandBlock(ev);
+  if (!text && !cmd && !ev.images?.length && !ev.widgets?.length) return '';
 
-  let html = '';
+  let html = cmd;
   if (text) {
     switch (ev.format) {
       case 'md':
-        html = renderMarkdown(text);
+        html += renderMarkdown(text);
         break;
       case 'diff':
-        html = renderDiff(text);
+        html += renderDiff(text);
         break;
       case 'ask':
-        html = renderAsk(text);
+        html += renderAsk(text);
         break;
       default:
-        html = renderPlain(text);
+        html += renderPlain(text);
     }
   }
 

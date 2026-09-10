@@ -863,6 +863,15 @@ reconstruction, because a wrong page is worse than none. Writes there are `visua
 rather than edits: they are artifacts made for the conversation, and counting them put ~260 lines of
 throwaway HTML into the implementation numbers.
 
+**A9. The command line lives in the row, not in the head.** (§3, §10.2)
+`OpFacts` gained `command`: the shell input exactly as it ran. The head still truncates it to one
+line — it is a row in a scrolling list — but opening the row now shows the whole command above the
+output it produced. Measured: 62 of 105 `Bash` calls in `example.jsonl` are multi-line, and a Codex
+chain like `sed …; sed …; rg …` parses into five commands of which the head showed one. Display only:
+the body text, its clamp, the cost estimate and the expand path are untouched, so nothing is charged
+twice for showing it. Codex takes the argv tail rather than `parsed_cmd[0]`, since the parse splits a
+chain into pieces and only the tail holds the line as written.
+
 ### 14.2 Not implemented
 
 - **Conversation stitching (§8.2).** Sessions are still one file each. Compactions are marked and

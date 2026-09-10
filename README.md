@@ -25,8 +25,9 @@ The design and the decisions behind it are in [SPEC.md](SPEC.md).
 
 **Timeline.** One row per thing that happened. Assistant prose renders as markdown, tables included
 — a pipe table becomes a real table rather than a wall of `|`; edits become coloured diffs from the
-transcript's `structuredPatch`; shell calls show the command with its stdout/stderr and an
-interrupted/error badge; reads show the path and line count; web calls become link lists with
+transcript's `structuredPatch`; shell calls put the whole command line above its stdout/stderr, with
+an interrupted/error badge — a head holds one truncated line, and 62 of the 105 Bash calls in
+`example.jsonl` are longer than that; reads show the path and line count; web calls become link lists with
 timing; todo writes become checklists; plans render as markdown; a question to the human shows every
 option it offered, with its description, and marks the one that was picked; screenshots appear
 inline and open in a lightbox, and a page the agent rendered for the human is shown where it showed

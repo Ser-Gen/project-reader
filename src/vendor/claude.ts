@@ -319,6 +319,18 @@ function toolHead(name: string, input: any, cwd?: string): string {
   }
 }
 
+/**
+ * The command line an operation ran, whole. A shell call is the one case where
+ * the head cannot stand for the row: a heredoc or a chained pipeline is many
+ * lines, and the first of them says almost nothing about what happened.
+ */
+function commandOf(name: string, input: any): string | undefined {
+  if (!input || typeof input !== 'object') return undefined;
+  if (name !== 'Bash' && name !== 'BashOutput' && name !== 'KillShell') return undefined;
+  const cmd = String(input.command ?? '').trim();
+  return cmd || undefined;
+}
+
 function targetOf(name: string, input: any): string | undefined {
   if (!input || typeof input !== 'object') return undefined;
   switch (name) {
@@ -685,6 +697,7 @@ export class ClaudeAdapter {
       category,
       target,
       subgroup: subgroupOf(name, category, target),
+      command: commandOf(name, input),
       status: 'unpaired',
     };
 

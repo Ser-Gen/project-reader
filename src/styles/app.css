@@ -481,6 +481,15 @@ pre.code {
   max-width: 100%;
 }
 pre.code code { background: none; padding: 0; font: inherit; }
+/* the command, above what it printed */
+pre.cmd {
+  border-left: 2px solid var(--c-bash);
+  background: color-mix(in srgb, var(--c-bash) 7%, var(--bg-2));
+  color: var(--fg);
+  max-height: 320px;
+  overflow: auto;
+  margin-bottom: 6px;
+}
 pre.diff { white-space: pre; overflow-x: auto; word-break: normal; }
 .dl { display: block; }
 .dl.add { color: var(--add); background: color-mix(in srgb, var(--add) 12%, transparent); }

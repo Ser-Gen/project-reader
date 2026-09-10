@@ -246,6 +246,7 @@ interface ItemRow {
   name: string;
   category: OpCategory;
   target?: string;
+  command?: string;
   /** the path exactly as the transcript wrote it, for content tracking */
   srcPath?: string;
   widgets?: Widget[];
@@ -338,11 +339,16 @@ export function itemRows(it: any, rel: (p: string) => string = (p) => p): ItemRo
     const chips: string[] = [];
     if (cmds.length > 1) chips.push(`${cmds.length} commands`);
     if (full.length > shown.length) chips.push('full output on expand');
+    // `parsed_cmd` is Codex's reading of the line; `command` is the line. For a
+    // chain like `pwd; rg …; sed …` the parse splits into several entries, so
+    // the argv tail is the only place the whole thing survives.
+    const whole = argv.length > 1 ? argv[argv.length - 1] : cmds.join('\n') || cmd;
     return [
       {
         name: 'exec_command',
         category,
         target,
+        command: whole.trim() || undefined,
         subgroup: category === 'read' && path ? extname(path) || basename(path) : commandHead(cmd),
         subtitle: cmds.length > 1 ? `${firstLine(cmd, 120)} (+${cmds.length - 1} more)` : firstLine(cmd, 160),
         chips,
@@ -860,7 +866,14 @@ export class CodexAdapter {
         text: '',
         format: 'text',
         collapsed: true,
-        op: { name: row.name, category: row.category, target: row.target, subgroup: row.subgroup, status: 'unpaired' },
+        op: {
+          name: row.name,
+          category: row.category,
+          target: row.target,
+          subgroup: row.subgroup,
+          command: row.command,
+          status: 'unpaired',
+        },
         // The script that caused this was charged on the way in, and a diff or
         // an image the model never received costs the context nothing.
         payloadIn: 0,
@@ -940,6 +953,7 @@ export class CodexAdapter {
         cmds.length ? commandHead(cmds[0])
         : script ? (scriptTools(script)[0] ?? 'script')
         : subgroupOf(category, target),
+      command: cmds.length ? cmds.join('\n') : undefined,
       status: 'unpaired',
     };
     const idx = this.b.add(
@@ -1022,6 +1036,7 @@ export class CodexAdapter {
             ev.op.category = row.category;
             ev.op.target = row.target;
             ev.op.subgroup = row.subgroup;
+            ev.op.command = row.command;
           }
           // A program that did several things is worth showing above what it
           // produced. One that did one thing is not: the item already says what

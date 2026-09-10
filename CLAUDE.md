@@ -10,7 +10,7 @@ Vite + TypeScript, **zero runtime dependencies**, entirely client-side. Design: 
 npm run dev      # http://localhost:5173, drop example.jsonl on the page
 npm run build    # tsc --noEmit && vite build
 npm run check    # types only
-npm test         # 85 tests: adapters, metrics, invariants, panels, real transcript
+npm test         # adapters, metrics, invariants, panels, real transcripts
 npm run inspect example.jsonl   # aggregates from a transcript, never its content
 ```
 
@@ -25,6 +25,24 @@ src/view/      virtualizer + fenwick, rows, markdown, ask, timeline, dock/
 src/store/     IndexedDB metrics cache, localStorage prefs
 tools/         inspect.mjs, gen-fixture.mjs, scenario.mjs (known-answer fixture)
 ```
+
+## Before anything else
+
+**The transcripts in the project root are irreplaceable, and nothing here writes to them.**
+`example.jsonl` and `rollout-*.jsonl` are one-off captures of real sessions. They are untracked, so
+git holds no copy, and the machine that produced them is usually not this one. Overwriting one
+destroys it.
+
+- **Every scratch file goes to the scratchpad, under a literal filename you typed.** Never write into
+  the project root, `~/.codex`, or `~/.claude`.
+- **Never pass a glob to a script that also takes an output path.** This is how a transcript was
+  destroyed: `node preview.mjs rollout-2026-09-03*.jsonl out.html` looked fine, the glob matched *two*
+  transcripts, so `argv[3]` was the second one instead of `out.html`, and the script wrote its preview
+  over it. Expand the arguments yourself and pass both as literal paths.
+- **A script that writes should refuse to write anywhere else.** One line at the top —
+  `if (!out.startsWith(SCRATCH)) throw new Error(out)` — turns a silent overwrite into an error.
+- **Read the transcripts by streaming.** `tools/inspect.mjs`, or a script that prints only aggregates;
+  never open one in full (see below).
 
 ## Things that will bite you
 

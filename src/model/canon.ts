@@ -83,6 +83,12 @@ export interface OpFacts {
   subgroup?: string;
   /** file path, url, command, query */
   target?: string;
+  /**
+   * The command line exactly as it ran, when the operation ran one. The row
+   * head has to truncate it to stay a head; this is the whole of it, shown
+   * inside the row when it is opened.
+   */
+  command?: string;
   status: OpStatus;
   exitCode?: number;
   linesAdded?: number;
