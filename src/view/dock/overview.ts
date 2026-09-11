@@ -3,10 +3,22 @@
  * before/after-the-plan split that answers "where did the budget go".
  */
 
-import type { SessionMetrics } from '../../model/metrics.js';
+import type { SessionMetrics, ThreadShare } from '../../model/metrics.js';
 import { escapeHtml } from '../markdown.js';
-import { bar, empty, plain, section, stat, tokensHuman } from './fmt.js';
+import { bar, empty, msHuman, plain, section, stat, tokensHuman } from './fmt.js';
 import { reviewNote } from './review.js';
+
+/**
+ * Name a thread in the table. Two reviewers of the same session carry the same
+ * name, so when that happens they are told apart by when they started — the one
+ * thing about them that differs and that a reader can find in the timeline.
+ */
+function threadLabel(sh: ThreadShare, all: readonly ThreadShare[]): string {
+  const twice = all.filter((o) => o.label === sh.label).length > 1;
+  const when = twice && sh.startTs ? ` · ${new Date(sh.startTs).toLocaleTimeString()}` : '';
+  const role = sh.role === 'main' || sh.label.includes(sh.role) ? '' : ` · ${sh.role}`;
+  return `${sh.label}${role}${when}`;
+}
 
 export function renderOverview(m: SessionMetrics): string {
   const t = m.tokens;
@@ -20,6 +32,38 @@ export function renderOverview(m: SessionMetrics): string {
           (m.review.detected ? plain('decisions', reviewNote(m.review)) : '') +
           `<div class="dnote">This file is one side of a conversation held in another file. Its prompts were ` +
           `composed by the runtime, so "prompts" here counts requests put to it, not things a person typed.</div>`,
+      )
+    : '';
+
+  // A merged session's totals belong to more than one thread. Summing them is
+  // the only way to say what the work cost; showing the split is the only way
+  // to keep that sum honest.
+  const threads = m.threads.merged
+    ? section(
+        'threads in this session',
+        `<table class="rtab"><thead><tr><th>thread</th><th class="n">events</th><th class="n">ops</th>` +
+          `<th class="n">billed</th><th class="n">~context</th><th class="n">span</th></tr></thead><tbody>` +
+          m.threads.shares
+            .map((sh) => {
+              const span = sh.startTs && sh.endTs > sh.startTs ? msHuman(sh.endTs - sh.startTs) : '—';
+              return (
+                `<tr>` +
+                `<td class="rw">${escapeHtml(threadLabel(sh, m.threads.shares))}` +
+                `${sh.detached ? ' <span class="chip" title="its clock does not overlap this session">detached</span>' : ''}</td>` +
+                `<td class="n">${sh.events.toLocaleString()}</td>` +
+                `<td class="n">${sh.ops.toLocaleString()}</td>` +
+                `<td class="n">${sh.billed.value === null ? '—' : tokensHuman(sh.billed.value)}</td>` +
+                // No operations means no operation cost — a dash, not a zero
+                // that looks like a measurement of something.
+                `<td class="n">${sh.ops ? `~${tokensHuman(sh.contextCost)}` : '—'}</td>` +
+                `<td class="n">${escapeHtml(span)}</td>` +
+                `</tr>`
+              );
+            })
+            .join('') +
+          `</tbody></table>` +
+          `<div class="dnote">Every other figure in this dock covers all of these threads together — that is what ` +
+          `this session cost. This is how it divides.</div>`,
       )
     : '';
 
@@ -125,5 +169,5 @@ export function renderOverview(m: SessionMetrics): string {
       plain('duration coverage', `${Math.round(q.coverage.durations * 100)}%`),
   );
 
-  return thread + tokens + clocks + ops + phases + plan + improvements + quality;
+  return thread + threads + tokens + clocks + ops + phases + plan + improvements + quality;
 }

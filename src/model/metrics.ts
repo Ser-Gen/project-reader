@@ -9,7 +9,7 @@
 import type { OpCategory, PlanRevision, ReviewFact, ThreadInfo, Vendor } from './canon.js';
 
 /** Bumped whenever a metric definition changes; invalidates the IndexedDB cache. */
-export const METRICS_SCHEMA_VERSION = 2;
+export const METRICS_SCHEMA_VERSION = 5;
 
 export type Provenance = 'reported' | 'derived' | 'estimated' | 'unavailable';
 
@@ -333,6 +333,39 @@ export interface CalibrationReport {
   note?: string;
 }
 
+/* ---------------- threads ---------------- */
+
+/**
+ * One thread's share of a session that was read as a whole. The main thread is
+ * always the first share; the rest are the dependent threads merged into it.
+ */
+export interface ThreadShare {
+  /** lane id; empty for the session's own thread */
+  id: string;
+  label: string;
+  role: 'main' | 'review' | 'subagent';
+  /** the file it came from, when it was a file of its own */
+  file?: string;
+  events: number;
+  ops: number;
+  requests: number;
+  freshInput: number;
+  output: number;
+  contextCost: number;
+  startTs: number;
+  endTs: number;
+  /** billed usage attributable to this thread */
+  billed: Metric;
+  /** its clock does not overlap the session, so it was parked at the end */
+  detached?: boolean;
+}
+
+export interface ThreadStats {
+  /** true when this session was read together with dependent threads */
+  merged: boolean;
+  shares: ThreadShare[];
+}
+
 /* ---------------- the whole thing ---------------- */
 
 export interface SessionMetrics {
@@ -359,6 +392,8 @@ export interface SessionMetrics {
   phases: PhaseModel;
   improvements: ImprovementStats;
   review: ReviewStats;
+  /** how a merged session's totals divide between the threads that earned them */
+  threads: ThreadStats;
   quality: QualityReport;
 }
 

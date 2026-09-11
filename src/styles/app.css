@@ -140,7 +140,7 @@ html, body {
 
 .sess {
   display: grid;
-  grid-template-columns: auto 1fr;
+  grid-template-columns: auto 1fr auto;
   gap: 2px 6px;
   width: 100%;
   text-align: left;
@@ -157,7 +157,25 @@ html, body {
 .sess.cmp { box-shadow: inset 2px 0 0 var(--accent-2); }
 .sess.dim { opacity: 0.55; cursor: default; }
 .sess b { font-size: 12px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sess .sub { grid-column: 2; color: var(--fg-faint); font: 10.5px var(--mono); }
+.sess .sub { grid-column: 2 / -1; color: var(--fg-faint); font: 10.5px var(--mono); }
+
+/* a session's dependent threads: the count that unfolds them, and the rows */
+.thr {
+  align-self: center;
+  font: 10px var(--mono);
+  color: var(--fg-faint);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0 4px;
+  white-space: nowrap;
+}
+.thr:hover { color: var(--accent-2); border-color: var(--accent-2); }
+.sess.sub-thr {
+  padding-left: 18px;
+  box-shadow: inset 2px 0 0 var(--accent-2);
+  background: color-mix(in srgb, var(--accent-2) 5%, transparent);
+}
+.v-thread { color: var(--accent-2); border-color: color-mix(in srgb, var(--accent-2) 45%, var(--line)); }
 .vd {
   grid-row: span 2;
   align-self: center;
@@ -534,6 +552,16 @@ img.shot {
 .s-error > .head > .badge { color: var(--err); }
 .s-interrupted > .head > .badge { color: var(--warn); }
 .side { margin-left: 44px; border-left: 2px solid var(--accent-2); padding-left: 8px; }
+/* merged in from another thread: named, and tinted so the eye can skip the lane */
+.ev.lane { background: color-mix(in srgb, var(--accent-2) 4%, transparent); }
+.lnm {
+  flex: none;
+  font: 10px var(--mono);
+  color: var(--accent-2);
+  border: 1px solid color-mix(in srgb, var(--accent-2) 40%, var(--line));
+  border-radius: 4px;
+  padding: 0 4px;
+}
 
 .vrow.flash .ev { animation: flash 1.2s ease-out; }
 @keyframes flash {
@@ -652,6 +680,7 @@ img.shot {
 .mk-phase span { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
 .mk-plan span { color: var(--c-plan); border-color: color-mix(in srgb, var(--c-plan) 45%, var(--line)); }
 .mk-compaction span { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
+.mk-thread span { color: var(--accent-2); border-color: color-mix(in srgb, var(--accent-2) 45%, var(--line)); }
 
 .chip.tok { color: var(--c-thinking); }
 .chip.ms { color: var(--c-web); }

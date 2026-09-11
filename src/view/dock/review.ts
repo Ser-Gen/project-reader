@@ -27,15 +27,26 @@ export function renderReview(m: SessionMetrics): string {
     );
   }
 
+  // The decisions can be this file's whole purpose, or they can belong to a
+  // thread merged into the session being read. Both are worth explaining, and
+  // they are not the same explanation.
   const thread = m.thread;
-  const head = section(
-    'what this thread is',
-    plain('role', thread ? thread.label : 'review') +
-      (thread?.parentId ? plain('reviews session', thread.parentId) : '') +
-      plain('model', m.model ?? '—') +
-      `<div class="dnote">Every prompt here was written by the runtime, not by a person: each one quotes the ` +
-      `session above and asks for one decision. The work being judged is in that other file.</div>`,
-  );
+  const lanes = m.threads.shares.filter((sh) => sh.role === 'review');
+  const head = thread
+    ? section(
+        'what this thread is',
+        plain('role', thread.label) +
+          (thread.parentId ? plain('reviews session', thread.parentId) : '') +
+          plain('model', m.model ?? '—') +
+          `<div class="dnote">Every prompt here was written by the runtime, not by a person: each one quotes the ` +
+          `session above and asks for one decision. The work being judged is in that other file.</div>`,
+      )
+    : section(
+        'where these decisions came from',
+        lanes.map((sh) => plain(sh.label, `${sh.events} events`)).join('') +
+          `<div class="dnote">These were made by a thread of its own, merged into this session: it read what this ` +
+          `session planned to do and answered. Its rows are in the timeline, indented, where the action it judged is.</div>`,
+      );
 
   const counts = section(
     'decisions',

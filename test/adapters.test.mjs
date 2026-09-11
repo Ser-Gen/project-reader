@@ -142,7 +142,7 @@ test('parallel calls in one request are marked as sharing their timing', () => {
 });
 
 test('subagent work is attributed to the call that spawned it', () => {
-  const { session } = run(ClaudeAdapter, [
+  const { session, adapter } = run(ClaudeAdapter, [
     rec({ type: 'assistant', message: { role: 'assistant', id: 'm1', content: [{ type: 'tool_use', id: 'task', name: 'Task', input: { subagent_type: 'Explore' } }] } }),
     rec({ isSidechain: true, type: 'assistant', message: { role: 'assistant', id: 'm2', content: [{ type: 'tool_use', id: 'g', name: 'Grep', input: { pattern: 'x' } }] } }),
   ]);
@@ -150,6 +150,22 @@ test('subagent work is attributed to the call that spawned it', () => {
   assert.equal(task.op.category, 'agent');
   assert.equal(grep.sidechain, 1);
   assert.equal(grep.spawnedBy, task.idx);
+
+  // And it reads as a thread of its own — the same shape a reviewer merged in
+  // from another file gets, so one explanation covers both.
+  assert.equal(grep.lane, `sub:${task.idx}`);
+  assert.equal(task.lane, undefined, 'the call that spawned it is on the main thread');
+  const [lane] = session.lanes;
+  assert.equal(lane.id, grep.lane);
+  assert.equal(lane.role, 'subagent');
+  assert.equal(lane.events, 1);
+  assert.match(lane.label, /^subagent · /);
+
+  const m = computeMetrics({ session, raw: adapter.b.quality, samples: [], options: DEFAULT_OPTIONS });
+  assert.equal(m.threads.merged, true, 'a session with a subagent divides into threads');
+  assert.deepEqual(m.threads.shares.map((s) => s.role), ['main', 'subagent']);
+  assert.equal(m.threads.shares[1].ops, 1);
+  assert.equal(m.threads.shares[0].ops + m.threads.shares[1].ops, m.ops.totals.calls);
 });
 
 test('plan mode wins over a todo list when both are present', () => {
@@ -868,7 +884,7 @@ test('a guardian thread is read as a review of another session, not as a session
   // The environment block does not open a turn; the two assessments do.
   assert.equal(session.segments.filter((s) => s.promptIdx >= 0).length, 2);
   assert.equal(session.segments[1].title, 'exec_command · rm');
-  assert.ok(session.events.some((e) => e.kind === 'notice' && e.title === 'environment'));
+  assert.ok(session.events.some((e) => e.kind === 'notice' && e.title === 'environment_context'));
 
   const request = session.events.find((e) => e.kind === 'prompt');
   assert.match(request.body, /rm -rf build/, 'the row shows the action it must judge');
@@ -917,4 +933,48 @@ test('an ordinary session keeps its prompts, its prose and no review tab', () =>
   assert.equal(m.review.detected, false);
   assert.equal(m.review.assessments.value, null);
   assert.equal(m.thread, undefined);
+});
+
+test('a session is named after what was asked, not after the file it arrived in', () => {
+  const { session } = run(CodexAdapter, [
+    cx(0, 'session_meta', { id: 'sess', session_id: 'sess', thread_source: 'user', cwd: '/repo' }),
+    // 9 KB of plugin catalogue and project instructions, under the user's role.
+    cx(1, 'response_item', {
+      type: 'message',
+      role: 'user',
+      content: [{ type: 'input_text', text: '<recommended_plugins>\nAirtable, Alpaca, Spotify\n</recommended_plugins>\n\n# Project Overview\nA shop.' }],
+    }),
+    // What a person actually typed, wrapped by their editor.
+    cx(2, 'response_item', {
+      type: 'message',
+      role: 'user',
+      content: [
+        {
+          type: 'input_text',
+          text: '# Context from my IDE setup:\n\n## Active file: src/a.php\n\n## My request:\nдобавь кнопку в корзину\n',
+        },
+      ],
+    }),
+    cx(3, 'response_item', { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'now ship it' }] }),
+  ]);
+
+  // The injected block is context, not the opening turn of the conversation.
+  const injected = session.events.find((e) => e.kind === 'notice');
+  assert.equal(injected.title, 'recommended_plugins');
+  assert.equal(injected.collapsed, true);
+  assert.equal(session.segments.filter((s) => s.promptIdx >= 0).length, 2);
+
+  // The IDE's preamble is kept in the body and dropped from the name.
+  assert.equal(session.segments[1].title, 'добавь кнопку в корзину');
+  assert.match(session.events[session.segments[1].promptIdx].body, /## Active file: src\/a\.php/);
+  assert.equal(session.info.title, 'добавь кнопку в корзину');
+  assert.notEqual(session.info.title, session.info.name);
+});
+
+test('a vendor that records its own title keeps it', () => {
+  const { session } = run(ClaudeAdapter, [
+    rec({ type: 'user', message: { role: 'user', content: 'first thing' } }),
+    rec({ type: 'ai-title', aiTitle: 'Refactor the parser' }),
+  ]);
+  assert.equal(session.info.title, 'Refactor the parser');
 });

@@ -13,7 +13,7 @@ const HEADER_H = 34; // a folded row is just its header
 
 export interface Marker {
   label: string;
-  kind: 'phase' | 'plan' | 'compaction';
+  kind: 'phase' | 'plan' | 'compaction' | 'thread';
 }
 
 export interface TimelineHooks {
@@ -38,6 +38,8 @@ export class Timeline {
   private cache = new Map<string, string>();
   private pendingBody = new Set<number>();
   private markers = new Map<number, Marker[]>();
+  /** lane id -> its name, for rows that came from a dependent thread */
+  private lanes = new Map<string, string>();
   private scale: RowScale = { costP90: 0, msP90: 0 };
 
   showSystem = false;
@@ -77,6 +79,7 @@ export class Timeline {
 
   setSession(session: CanonSession): void {
     this.events = session.events;
+    this.lanes = new Map((session.lanes ?? []).map((l) => [l.id, l.label]));
     this.folded = new Set(session.events.filter((e) => e.collapsed).map((e) => e.idx));
     this.full.clear();
     this.cache.clear();
@@ -194,7 +197,9 @@ export class Timeline {
     const key = `${evIdx}:${open ? 1 : 0}:${isFull ? 1 : 0}:${ev.body.length}`;
     let html = this.cache.get(key);
     if (html === undefined) {
-      html = markerHtml(this.markers.get(evIdx)) + renderRow(ev, open, isFull, this.scale);
+      html =
+        markerHtml(this.markers.get(evIdx)) +
+        renderRow(ev, open, isFull, this.scale, ev.lane ? this.lanes.get(ev.lane) : undefined);
       if (this.cache.size > 400) this.cache.clear();
       this.cache.set(key, html);
     }

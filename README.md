@@ -263,6 +263,19 @@ test/
   implementation end and unplanned work. They appear as `visualize` operations instead.
 - **Codex reasoning carries no readable text** — encrypted in one format, empty in the other. The
   session says so rather than looking as though it never thought.
+- **The folder list is right before you click it.** Opening a folder reads the head of each transcript
+  — 256 KB, bounded — and keeps only what the file says about itself: its name, its project (`cwd`), the
+  moment it started and the thread it serves. Sessions are listed under their real project, named for
+  what was asked, and ordered by when they started rather than when the file was last written, so
+  nothing renames itself or jumps around once you begin reading. A Cursor database is the exception:
+  its chat titles cannot be read without walking the whole file, so it keeps its file name until opened.
+- **A Codex rollout carries no name**, so the reader gives it one: the first thing the human asked
+  for, shown in the header with the file name moved down to the meta line. Two kinds of noise had to
+  go first — the context the runtime injects under the user's role (the plugin catalogue, the
+  environment block, the project's instructions: 9.8 KB in one message, and formerly the session's
+  opening "prompt"), and the preamble an IDE wraps a request in, which puts the active file and every
+  open tab ahead of the person's own words. Those are marked `## My request:`, and the name is taken
+  from there while the body keeps everything the model was given.
 - **Some Codex rollouts are not sessions.** A *guardian* thread — the reviewer that decides whether the
   session it watches may run the action it just planned — writes a rollout of its own, and says so in
   its header: `thread_source: "guardian_review"`, a `parent_thread_id`, and a `session_id` that is the
@@ -274,6 +287,21 @@ test/
   quoted becomes an event: it happened in a file this reader has not seen. What such a thread does have
   is decisions, and they get their own tab — how many assessments, which way each went, the risk the
   reviewer assigned, and how long it took to answer.
+- **When both files are there, they are one session.** A guardian thread read apart from the work it
+  judged is a verdict with no subject, so the reader folds it in: its events sit in the parent's
+  timeline in the order things actually happened, indented into a lane that carries the thread's name,
+  and every total in the dock covers both — with a per-thread table saying how the sum divides. In the
+  folder list the thread is not a session of its own; it sits folded under the one it serves behind a
+  `▸ 1 sub` count, and clicking it opens that session at the thread's first event. A thread whose clock
+  does not overlap the session it belongs to is never interleaved at a guessed position: it is parked
+  at the end, in a block that says why.
+- **A Claude subagent is the same thing, wherever it was written.** Older Claude Code records a
+  subagent inline; newer versions give it a file of its own under `<session>/subagents/`. Either way
+  the reader shows one session: the thread's work is indented into a lane at the moment it happened,
+  named after the job it was sent to do — "subagent · investigate gamepad support", not "Explore" —
+  and anchored to the call that asked for it. A file written this way records its parent's session id
+  and not its own, so left unread it looks like a separate session with a machine-written first
+  prompt; five explorations become five sessions in the list. They do not here.
 - **Cursor** records no token usage at all and often no per-message timestamps, so its token figures
   are estimated, its durations are mostly unavailable, and its busy clock does not exist. Its schema
   is undocumented and moves between versions; both adapters are labelled experimental until they have

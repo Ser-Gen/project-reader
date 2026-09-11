@@ -93,6 +93,12 @@ export interface OpFacts {
   exitCode?: number;
   linesAdded?: number;
   linesRemoved?: number;
+  /**
+   * The id of the dependent thread this call started, when the runtime wrote
+   * that thread to a file of its own. It is the only link back: the call itself
+   * says what was asked for, and only the result says which thread answered.
+   */
+  spawnedThread?: string;
 }
 
 /**
@@ -154,6 +160,8 @@ export interface CanonEvent {
   tokens: TokenFacts;
   /** 0 = main thread, >=1 = subagent nesting depth */
   sidechain: number;
+  /** id of the `LaneInfo` this happened on; absent means the main thread */
+  lane?: string;
   /** idx of the op that launched this subagent's work */
   spawnedBy?: number;
 
@@ -222,6 +230,34 @@ export interface ThreadInfo {
   parentId?: string;
 }
 
+/**
+ * A thread of work that was merged into another session's timeline.
+ *
+ * A guardian review is a separate rollout file; a Claude subagent is a stretch
+ * of the same one. Either way the reader shows one session, and every event
+ * that did not happen on the main thread names the lane it happened on — which
+ * is also how the per-thread breakdown of a summed figure is computed without
+ * any metric knowing what a guardian is.
+ */
+export interface LaneInfo {
+  id: string;
+  /** how to name it: "guardian review", "subagent · explore the repo" */
+  label: string;
+  role: ThreadInfo['role'];
+  /** the vendor's own word for it */
+  kind: string;
+  /** the file it came out of, when it was a file of its own */
+  file?: string;
+  startTs: number;
+  endTs: number;
+  events: number;
+  /**
+   * Its clock does not overlap the session it belongs to, so it could not be
+   * interleaved honestly and sits at the end instead.
+   */
+  detached?: boolean;
+}
+
 export interface SessionInfo {
   id: string;
   name: string;
@@ -267,6 +303,8 @@ export interface CanonSession {
   events: CanonEvent[];
   segments: Segment[];
   parts?: SessionPart[];
+  /** dependent threads whose events were merged into `events` */
+  lanes?: LaneInfo[];
 }
 
 /** A plan artifact as it existed at one point in time. */

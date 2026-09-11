@@ -11,6 +11,7 @@ import type {
   CanonKind,
   CanonSession,
   ImageRef,
+  LaneInfo,
   OpFacts,
   ReviewFact,
   Segment,
@@ -43,6 +44,11 @@ export interface EventSource {
   search?: string;
   /** tool name, needed to rebuild an over-sized tool body on expand */
   tool?: string;
+  /**
+   * The file these bytes are in, when it is not the session's own — an event
+   * merged in from a dependent thread is re-read from the file it came from.
+   */
+  file?: File;
 }
 
 export interface RawQuality {
@@ -299,6 +305,28 @@ export class Builder {
     }
   }
 
+  /**
+   * A file name is not a name.
+   *
+   * Claude records an `ai-title` and Cursor keeps the chat's, but Codex records
+   * nothing at all, so its sessions were shown as `rollout-<date>-<uuid>` — the
+   * one string in the header that says nothing about the conversation. Called
+   * after segments settle, and only when the vendor supplied no title of its
+   * own: the session is named after the first thing the human asked for, the way
+   * every chat UI names a conversation. A dependent thread is named for what it
+   * is instead, since its first prompt was written by a machine.
+   */
+  private nameSession(): void {
+    if (this.info.title && this.info.title !== this.info.name) return;
+    const thread = this.info.thread;
+    if (thread) {
+      this.info.title = thread.parentId ? `${thread.label} · ${thread.parentId.slice(0, 8)}…` : thread.label;
+      return;
+    }
+    const first = this.segments.find((s) => s.promptIdx >= 0 && s.title && s.title !== '(empty prompt)');
+    if (first) this.info.title = oneLine(first.title, 80);
+  }
+
   openSegment(promptText: string, ts: number): void {
     const prev = this.segments[this.segments.length - 1];
     if (prev) prev.lastEvent = this.events.length - 1;
@@ -406,14 +434,59 @@ export class Builder {
       }
     }
 
-    // Subagent work belongs to the call that spawned it.
+    // Subagent work belongs to the call that spawned it — and reads as a thread
+    // of its own, the same way a reviewer merged in from another file does. One
+    // shape for "this did not happen on the main thread", whoever wrote it.
+    //
+    // A file that *is* a thread has no main thread to contrast with: every event
+    // in it is the thread, so tagging each one with a lane says nothing and puts
+    // a lane chip on every row. Its lane is named by whoever merges it in.
+    const lanes = new Map<string, LaneInfo>();
     let lastAgent = -1;
-    for (const ev of this.events) {
-      if (ev.sidechain === 0 && ev.op?.category === 'agent') lastAgent = ev.idx;
-      else if (ev.sidechain > 0 && lastAgent >= 0) ev.spawnedBy = lastAgent;
+    for (const ev of this.info.thread ? [] : this.events) {
+      if (ev.sidechain === 0 && ev.op?.category === 'agent') {
+        lastAgent = ev.idx;
+        continue;
+      }
+      if (ev.sidechain === 0) continue;
+      if (lastAgent >= 0) ev.spawnedBy = lastAgent;
+      const id = lastAgent >= 0 ? `sub:${lastAgent}` : 'sub';
+      ev.lane = id;
+      let lane = lanes.get(id);
+      if (!lane) {
+        lane = {
+          id,
+          label: subagentLabel(lastAgent >= 0 ? this.events[lastAgent] : undefined),
+          role: 'subagent',
+          kind: 'sidechain',
+          startTs: ev.ts,
+          endTs: ev.ts,
+          events: 0,
+        };
+        lanes.set(id, lane);
+      }
+      lane.events++;
+      if (ev.ts) {
+        if (!lane.startTs || ev.ts < lane.startTs) lane.startTs = ev.ts;
+        if (ev.ts > lane.endTs) lane.endTs = ev.ts;
+      }
     }
 
+    this.nameSession();
     this.info.parseMs = parseMs;
-    return { info: this.info, events: this.events, segments: this.segments };
+    return {
+      info: this.info,
+      events: this.events,
+      segments: this.segments,
+      lanes: lanes.size ? [...lanes.values()] : undefined,
+    };
   }
+}
+
+/** Name a subagent after the job it was given, which is what the call says. */
+function subagentLabel(spawn: CanonEvent | undefined): string {
+  // The row head first: `subgroup` for an agent call is the type of agent, which
+  // names every Explore the same.
+  const what = spawn?.subtitle ?? spawn?.op?.subgroup ?? spawn?.op?.target ?? '';
+  return what ? `subagent · ${oneLine(what, 48)}` : 'subagent';
 }

@@ -14,19 +14,31 @@ import { metric, unavailable, type ReviewStats, type ReviewVerdict } from '../mo
 
 export function computeReview(events: readonly CanonEvent[]): ReviewStats {
   const verdicts: ReviewVerdict[] = [];
-  let asked = 0;
-  let pending = 0; // ts of the request this verdict answers
+  /** requests per thread, so only the threads that judge are counted */
+  const askedOf = new Map<string, number>();
+  const judging = new Set<string>();
+  /**
+   * ts of the request each thread is waiting on. Kept per lane because a review
+   * thread merged into the session it watches sits among that session's own
+   * prompts, and pairing a verdict with the human's last message would measure
+   * something nobody asked about.
+   */
+  const pendingOf = new Map<string, number>();
+  const MAIN = '';
 
   for (const ev of events) {
+    const lane = ev.lane ?? MAIN;
     // A request is whatever opened the turn; for a review thread that is the
     // machine-composed prompt carrying the planned action.
     if (ev.kind === 'prompt') {
-      asked++;
-      pending = ev.ts;
+      askedOf.set(lane, (askedOf.get(lane) ?? 0) + 1);
+      pendingOf.set(lane, ev.ts);
       continue;
     }
     const fact: ReviewFact | undefined = ev.review;
     if (!fact) continue;
+    judging.add(lane);
+    const pending = pendingOf.get(lane) ?? 0;
     verdicts.push({
       idx: ev.idx,
       ts: ev.ts,
@@ -38,7 +50,7 @@ export function computeReview(events: readonly CanonEvent[]): ReviewStats {
       subject: fact.subject,
       ms: pending && ev.ts >= pending ? ev.ts - pending : null,
     });
-    pending = 0;
+    pendingOf.set(lane, 0);
   }
 
   if (!verdicts.length) {
@@ -54,6 +66,11 @@ export function computeReview(events: readonly CanonEvent[]): ReviewStats {
       byRisk: [],
     };
   }
+
+  // Only the threads that actually decided things: in a merged session the
+  // human's own prompts are not requests anyone reviewed.
+  let asked = 0;
+  for (const lane of judging) asked += askedOf.get(lane) ?? 0;
 
   const count = (d: ReviewVerdict['decision']): number => verdicts.filter((v) => v.decision === d).length;
   const timed = verdicts.map((v) => v.ms).filter((n): n is number => n !== null);

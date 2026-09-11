@@ -122,14 +122,30 @@ export class Virtualizer {
     });
   }
 
-  /** One frame: decide the window, mount/unmount, then measure. */
+  /**
+   * One frame's work, settled.
+   *
+   * A pass decides the window from the heights it knows, mounts that window and
+   * only then measures what it mounted — so a pass that corrects a height has
+   * answered a question the window was already computed from. Collapsing a tall
+   * row is the case that shows: the rows below it move up into the viewport,
+   * but they were nowhere near it when the window was chosen, so the space they
+   * should fill stays empty until the next scroll re-runs this. Repeating until
+   * nothing moves costs one extra measuring pass in the common case and removes
+   * the interaction the reader had to make to see their own screen.
+   */
   private sync(): void {
     if (this.adjusting) return;
-    const { scroller, content, overscanPx = 900 } = this.opts;
     if (this.count === 0) {
-      content.style.height = '0px';
+      this.opts.content.style.height = '0px';
       return;
     }
+    for (let pass = 0; pass < 4 && this.layout(); pass++);
+  }
+
+  /** Decide the window, mount/unmount, measure. True when a height changed. */
+  private layout(): boolean {
+    const { scroller, content, overscanPx = 900 } = this.opts;
 
     const scrollTop = scroller.scrollTop;
     const first = this.heights.indexAt(Math.max(0, scrollTop - overscanPx));
@@ -160,7 +176,7 @@ export class Virtualizer {
     }
     if (frag.childNodes.length) content.appendChild(frag);
 
-    this.measure(first);
+    const changed = this.measure(first);
 
     // Reposition everything against the (possibly patched) height index.
     for (const [i, el] of this.mounted) {
@@ -173,13 +189,14 @@ export class Virtualizer {
       this.end = last;
       this.opts.onRange?.(first, last);
     }
+    return changed;
   }
 
   /**
    * Single batched read pass. Anchors on the first row at/after the viewport top
    * so that height corrections above it don't move the visible content.
    */
-  private measure(first: number): void {
+  private measure(first: number): boolean {
     const scroller = this.opts.scroller;
     const anchor = this.heights.indexAt(scroller.scrollTop + 1);
     const before = this.heights.offsetOf(anchor);
@@ -192,7 +209,7 @@ export class Virtualizer {
         changed = true;
       }
     }
-    if (!changed) return;
+    if (!changed) return false;
 
     const after = this.heights.offsetOf(anchor);
     const delta = after - before;
@@ -201,6 +218,7 @@ export class Virtualizer {
       scroller.scrollTop += delta;
       this.adjusting = false;
     }
+    return true;
   }
 
   private makeRow(): HTMLElement {

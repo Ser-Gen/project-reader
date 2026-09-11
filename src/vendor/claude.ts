@@ -435,7 +435,7 @@ export class ClaudeAdapter {
     if (rec?.cwd && !info.cwd) info.cwd = rec.cwd;
     if (rec?.gitBranch && !info.gitBranch) info.gitBranch = rec.gitBranch;
     if (rec?.version) info.version = rec.version;
-    if (rec?.sessionId && !info.sessionId) info.sessionId = rec.sessionId;
+    this.identify(rec);
     if (rec?.uuid) {
       if (!info.firstUuid) info.firstUuid = rec.uuid;
       info.lastUuid = rec.uuid;
@@ -664,6 +664,32 @@ export class ClaudeAdapter {
     this.b.addSystem(t, '', ts, start, end);
   }
 
+  /**
+   * Whose conversation this file is.
+   *
+   * A subagent writes its own file (`<session>/subagents/agent-<id>.jsonl`) and
+   * every record in it carries the *parent's* `sessionId` — the same trap Codex
+   * sets with a guardian review. Its own identity is `agentId`, so that is what
+   * becomes `sessionId` here and the recorded `sessionId` becomes the parent it
+   * serves. Taking the field at face value files five threads under the session
+   * they came out of, all claiming to be it.
+   */
+  private identify(rec: any): void {
+    const info = this.b.info;
+    // The first record that claims an identity settles it. A session whose
+    // subagents are written inline also has records with an `agentId`, halfway
+    // down; only a file that opens as a thread is one.
+    if (info.sessionId) return;
+    const agentId = typeof rec?.agentId === 'string' ? rec.agentId : '';
+    const sessionId = typeof rec?.sessionId === 'string' ? rec.sessionId : '';
+    if (agentId && rec?.isSidechain === true) {
+      info.sessionId = agentId;
+      info.thread = { role: 'subagent', kind: 'sidechain', label: 'subagent', parentId: sessionId || undefined };
+      return;
+    }
+    if (sessionId) info.sessionId = sessionId;
+  }
+
   private openTool(
     rec: any,
     block: any,
@@ -837,6 +863,10 @@ export class ClaudeAdapter {
     }
 
     const tur = rec?.toolUseResult;
+    // The call that launches a subagent does not name it; the result does. That
+    // id is what lets a thread written to its own file be anchored to the op
+    // that asked for it, instead of dropped in by timestamp alone.
+    if (ev.op && typeof tur?.agentId === 'string') ev.op.spawnedThread = tur.agentId;
     const reportedMs =
       typeof tur?.durationMs === 'number' ? tur.durationMs
       : typeof tur?.durationSeconds === 'number' ? tur.durationSeconds * 1000

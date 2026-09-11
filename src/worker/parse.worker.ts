@@ -17,7 +17,9 @@ import { ClaudeAdapter, fullBody as claudeBody } from '../vendor/claude.js';
 import { CodexAdapter, fullBody as codexBody } from '../vendor/codex.js';
 import { CursorAdapter, MAX_DB_BYTES, parseExportedChat, readCursorDb } from '../vendor/cursor.js';
 import type { Builder, EventSource } from '../vendor/builder.js';
+import { mergeThreads } from '../vendor/merge.js';
 import { readLine, streamLines } from './jsonl.js';
+import { peekIdentity } from './peek.js';
 import { extractImages, revokeAll } from './images.js';
 
 interface State {
@@ -36,7 +38,7 @@ self.onmessage = (e: MessageEvent<ToWorker>) => {
   const msg = e.data;
   switch (msg.type) {
     case 'parse':
-      void parse(msg.fileId, msg.file, msg.options, msg.part);
+      void parse(msg.fileId, msg.file, msg.options, msg.part, msg.children);
       break;
     case 'expand':
       void expand(msg.fileId, msg.reqId, msg.idx);
@@ -51,7 +53,7 @@ self.onmessage = (e: MessageEvent<ToWorker>) => {
       void sniff(msg.reqId, msg.id, msg.file);
       break;
     case 'analyze':
-      void analyze(msg.reqId, msg.id, msg.file, msg.options);
+      void analyze(msg.reqId, msg.id, msg.file, msg.options, msg.children);
       break;
     case 'close':
       sessions.delete(msg.fileId);
@@ -60,15 +62,31 @@ self.onmessage = (e: MessageEvent<ToWorker>) => {
   }
 };
 
+/**
+ * Vendor plus identity: what the file is, and what it says it is. The peek is
+ * bounded (see `peek.ts`) and its cost is what buys a sidebar that is correct
+ * before the first click rather than after it.
+ */
 async function sniff(reqId: number, id: string, file: File): Promise<void> {
   try {
     const d = await detectFile(file);
-    post({ type: 'sniffed', reqId, result: { id, vendor: d.vendor, confidence: d.confidence, reason: d.reason } });
+    const identity = await peekIdentity(file, d);
+    post({
+      type: 'sniffed',
+      reqId,
+      result: { id, vendor: d.vendor, confidence: d.confidence, reason: d.reason, identity },
+    });
   } catch (err) {
     post({
       type: 'sniffed',
       reqId,
-      result: { id, vendor: 'unknown', confidence: 0, reason: err instanceof Error ? err.message : 'unreadable' },
+      result: {
+        id,
+        vendor: 'unknown',
+        confidence: 0,
+        reason: err instanceof Error ? err.message : 'unreadable',
+        identity: { complete: false },
+      },
     });
   }
 }
@@ -76,7 +94,6 @@ async function sniff(reqId: number, id: string, file: File): Promise<void> {
 interface Parsed {
   builder: Builder;
   session: CanonSession;
-  metrics: SessionMetrics;
   vendor: Detection['vendor'];
 }
 
@@ -126,13 +143,12 @@ async function build(
   if (!lines) adapter.b.note('The file is empty.');
 
   const session = adapter.finish(Math.round(performance.now() - t0));
-  const metrics = computeMetrics({
-    session,
-    raw: adapter.b.quality,
-    samples: adapter.b.samples,
-    options,
-  });
-  return { builder: adapter.b, session, metrics, vendor: det.vendor };
+  return { builder: adapter.b, session, vendor: det.vendor };
+}
+
+/** Metrics are computed from whatever the session ended up being — merged or not. */
+function metricsOf(builder: Builder, session: CanonSession, options: MetricOptions): SessionMetrics {
+  return computeMetrics({ session, raw: builder.quality, samples: builder.samples, options });
 }
 
 /** Cursor keeps every chat in one SQLite file; the reader opens one at a time. */
@@ -162,8 +178,7 @@ async function cursorDb(
   }));
   const adapter = new CursorAdapter(fileId, file.name, file.size, det.confidence, options.calibration ?? {});
   const session = adapter.build(chat, parts, notes, Math.round(performance.now() - t0));
-  const metrics = computeMetrics({ session, raw: adapter.b.quality, samples: [], options });
-  return { builder: adapter.b, session, metrics, vendor: 'cursor' };
+  return { builder: adapter.b, session, vendor: 'cursor' };
 }
 
 async function cursorExport(
@@ -177,11 +192,16 @@ async function cursorExport(
   if (!chat) throw new Error('This looks like a Cursor export but no messages could be read from it.');
   const adapter = new CursorAdapter(fileId, file.name, file.size, det.confidence, options.calibration ?? {});
   const session = adapter.build(chat, [], ['Cursor: read from an exported chat, not the database.'], Math.round(performance.now() - t0));
-  const metrics = computeMetrics({ session, raw: adapter.b.quality, samples: [], options });
-  return { builder: adapter.b, session, metrics, vendor: 'cursor' };
+  return { builder: adapter.b, session, vendor: 'cursor' };
 }
 
-async function parse(fileId: string, file: File, options: MetricOptions, part?: string): Promise<void> {
+async function parse(
+  fileId: string,
+  file: File,
+  options: MetricOptions,
+  part?: string,
+  children?: { id: string; file: File }[],
+): Promise<void> {
   let lastPost = 0;
   const onProgress = (bytes: number) => {
     const now = performance.now();
@@ -192,8 +212,32 @@ async function parse(fileId: string, file: File, options: MetricOptions, part?: 
   };
 
   try {
-    const { builder, session, metrics, vendor } = await build(fileId, file, options, part, onProgress);
-    sessions.set(fileId, { file, vendor, builder, session, sources: builder.sources, options });
+    const main = await build(fileId, file, options, part, onProgress);
+    let session = main.session;
+    let sources: EventSource[] = main.builder.sources;
+
+    // A dependent thread is part of this session, so it is read here rather
+    // than opened separately. One that cannot be read must not cost the
+    // session it belongs to: the note says so and the timeline goes on.
+    if (children?.length) {
+      const threads = [];
+      for (const child of children) {
+        try {
+          const sub = await build(child.id, child.file, options, undefined);
+          threads.push({ session: sub.session, sources: sub.builder.sources, file: child.file });
+        } catch (err) {
+          main.builder.note(
+            `A dependent thread (${child.file.name}) could not be read: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+      const merged = mergeThreads({ session, sources }, threads);
+      session = merged.session;
+      sources = merged.sources;
+    }
+
+    const metrics = metricsOf(main.builder, session, options);
+    sessions.set(fileId, { file, vendor: main.vendor, builder: main.builder, session, sources, options });
     post({ type: 'done', fileId, session, metrics });
   } catch (err) {
     post({ type: 'failed', fileId, message: err instanceof Error ? err.message : String(err) });
@@ -201,10 +245,29 @@ async function parse(fileId: string, file: File, options: MetricOptions, part?: 
 }
 
 /** Metrics only: nothing is retained, so a whole folder can be swept cheaply. */
-async function analyze(reqId: number, id: string, file: File, options: MetricOptions): Promise<void> {
+async function analyze(
+  reqId: number,
+  id: string,
+  file: File,
+  options: MetricOptions,
+  children?: { id: string; file: File }[],
+): Promise<void> {
   try {
-    const { metrics } = await build(id, file, options, undefined);
-    post({ type: 'analyzed', reqId, id, metrics });
+    const parsed = await build(id, file, options, undefined);
+    let session = parsed.session;
+    if (children?.length) {
+      const threads = [];
+      for (const child of children) {
+        try {
+          const sub = await build(child.id, child.file, options, undefined);
+          threads.push({ session: sub.session, sources: sub.builder.sources, file: child.file });
+        } catch {
+          /* a thread that cannot be read is left out of the sweep, as of the read */
+        }
+      }
+      session = mergeThreads({ session, sources: parsed.builder.sources }, threads).session;
+    }
+    post({ type: 'analyzed', reqId, id, metrics: metricsOf(parsed.builder, session, options) });
   } catch (err) {
     post({ type: 'analyzed', reqId, id, metrics: null, message: err instanceof Error ? err.message : String(err) });
   }
@@ -241,7 +304,7 @@ async function expand(fileId: string, reqId: number, idx: number): Promise<void>
   }
   // Too big to retain: re-read exactly that one line from disk and rebuild the body.
   try {
-    const text = await readLine(st.file, src.start, src.end);
+    const text = await readLine(src.file ?? st.file, src.start, src.end);
     const rec = JSON.parse(text);
     const body = st.vendor === 'codex' ? codexBody(rec, src) : claudeBody(rec, src);
     post({ type: 'expanded', fileId, reqId, body });

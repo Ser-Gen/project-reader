@@ -15,6 +15,7 @@ import { computePhases } from './phases.js';
 import { computePlan } from './plan.js';
 import { computeQuality } from './quality.js';
 import { computeReview } from './review.js';
+import { computeThreads } from './threads.js';
 import { computeTime } from './time.js';
 import { computeTokens } from './tokens.js';
 
@@ -53,6 +54,7 @@ export function computeMetrics({ session, raw, samples, options }: MetricsInput)
     phases,
     improvements: computeImprovements(events, segments, plan, phases),
     review: computeReview(events),
+    threads: computeThreads(session),
     quality: computeQuality(session, raw, fit),
   };
 }

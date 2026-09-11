@@ -180,16 +180,27 @@ function metricChips(ev: CanonEvent, scale?: RowScale): string {
   return out;
 }
 
-export function renderRow(ev: CanonEvent, open: boolean, full: boolean, scale?: RowScale): string {
+export function renderRow(
+  ev: CanonEvent,
+  open: boolean,
+  full: boolean,
+  scale?: RowScale,
+  /** name of the dependent thread this happened on, when it is not the main one */
+  lane?: string,
+): string {
   const cat = iconOf(ev);
   const status = ev.op?.status;
   const cls = ['ev', `k-${ev.kind}`, `c-${cat}`];
   if (status && status !== 'unpaired') cls.push(`s-${status}`);
   if (status === 'unpaired') cls.push('s-pending');
   if (ev.sidechain > 0) cls.push('side');
+  if (ev.lane) cls.push('lane');
   if (open) cls.push('open');
 
   const chips = ev.chips?.length ? ev.chips.map((c) => `<span class="chip">${escapeHtml(c)}</span>`).join('') : '';
+  // Borrowed rows say whose they are: the indent shows that this is not the
+  // main thread, the label says which thread it is.
+  const laneTag = lane ? `<span class="lnm" title="a dependent thread of this session">${escapeHtml(lane)}</span>` : '';
   const imgChip = ev.images?.length ? `<span class="chip img">${ev.images.length} img</span>` : '';
   const planChip = ev.plan?.role === 'revision' ? `<span class="chip plan">plan</span>` : '';
   const sub = ev.subtitle ? `<span class="sub">${escapeHtml(ev.subtitle)}</span>` : '';
@@ -202,6 +213,7 @@ export function renderRow(ev: CanonEvent, open: boolean, full: boolean, scale?: 
     icon(cat) +
     `<time>${timeOf(ev.ts)}</time>` +
     `<span class="badge">${escapeHtml(ev.op?.name ?? ev.title)}</span>` +
+    laneTag +
     sub +
     `<span class="grow"></span>` +
     planChip +

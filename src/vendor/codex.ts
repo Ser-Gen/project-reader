@@ -465,6 +465,32 @@ export function itemRows(it: any, rel: (p: string) => string = (p) => p): ItemRo
 }
 
 /**
+ * Runtime context arriving under the user's role, named by its own tag.
+ *
+ * The tell is that the message opens with a line that is nothing but a tag:
+ * `<recommended_plugins>`, `<environment_context>`. One such message in these
+ * rollouts is 9.8 KB of plugin catalogue, project instructions and environment
+ * — and it is what the sidebar used to show as the session's first prompt.
+ */
+function runtimeBlock(text: string): string {
+  const first = text.trimStart().split('\n', 1)[0].trim();
+  const tag = /^<([a-z][a-z0-9_]*)>$/.exec(first);
+  return tag ? tag[1] : '';
+}
+
+/**
+ * What the human actually asked, out of a message their IDE wrapped.
+ *
+ * Codex's editor extensions prepend the active file, the open tabs and every
+ * attachment, then mark the person's own words with `## My request:`. Only the
+ * title uses this — the body keeps everything the model was given.
+ */
+function promptTitle(text: string): string {
+  const at = text.indexOf('## My request:');
+  return at === -1 ? text : text.slice(at + '## My request:'.length).trim() || text;
+}
+
+/**
  * What kind of thread this file holds.
  *
  * Codex says so itself: an ordinary session is `thread_source: "user"`, while a
@@ -630,17 +656,19 @@ export class CodexAdapter {
         // `developer` is the IDE's own context, not something a human wrote:
         // counting it as a prompt would split the session into phantom turns.
         const dev = p.role === 'developer' || p.role === 'system';
-        // The environment block is injected by the runtime under the user's
-        // role. It is the same kind of thing as a `developer` message, and
-        // treating it as a turn opens a segment nobody asked for.
-        if (human && /^<environment_context>/.test(text.trimStart())) {
+        // Context the runtime injects under the user's role — the plugin list,
+        // the environment block, the project's instructions appended to them.
+        // It is the same kind of thing as a `developer` message, and treating it
+        // as a turn opens a segment nobody asked for, first in the file.
+        const block = human ? runtimeBlock(text) : '';
+        if (block) {
           this.b.add(
             {
               kind: 'notice',
               ts,
               tsSource,
-              title: 'environment',
-              subtitle: p.cwd ? String(p.cwd) : this.b.info.cwd,
+              title: block,
+              subtitle: this.b.info.cwd,
               text,
               format: 'text',
               cls: 'terminal',
@@ -653,7 +681,7 @@ export class CodexAdapter {
         }
         if (human && this.review(text, ts, tsSource, start, end)) return;
         if (!human && !dev && this.verdict(text, ts, tsSource, start, end)) return;
-        if (human) this.b.openSegment(text, ts);
+        if (human) this.b.openSegment(promptTitle(text), ts);
         this.lastEventIdx = this.b.add(
           {
             kind: dev ? 'system' : human ? 'prompt' : 'text',

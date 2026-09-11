@@ -896,15 +896,94 @@ dock. `SessionInfo` gained `thread` (`role`, the vendor's own `kind`, a label, `
   dock gains a review tab, shown only for these files, and the operations panel explains that a
   reviewer runs nothing rather than showing an empty table.
 
-The same `session_meta` reading fixes an ordinary-session bug: `<environment_context>` arrives under
-the user's role and was opening a phantom turn in every v2 rollout. It is a notice now.
+The same `session_meta` reading fixes an ordinary-session bug: the runtime injects context under the
+**user's** role, and it was opening phantom turns in every Codex rollout. The tell is a message whose
+first line is nothing but a tag — `<recommended_plugins>`, `<environment_context>`; one such message
+here is 9.8 KB of plugin catalogue, project instructions and environment, and it was the first thing
+the sidebar showed as a prompt. They are notices now, named after their own tag.
+
+**A11. A file name is not a session name.** (§3, §10.1)
+The header showed `rollout-2026-09-10T16-27-53-01a08b80-….jsonl`, because `SessionInfo.title`
+defaulted to the file name and Codex records no title anywhere in a rollout — Claude has `ai-title`
+and Cursor keeps the chat's, Codex has nothing. `Builder.finish` now names an unnamed session after
+the first thing the human asked for, the way every chat UI names a conversation, and a dependent
+thread after what it is (`guardian review · 01a08b78…`), since its first prompt was written by a
+machine. Two things make that name worth reading rather than more boilerplate: the runtime blocks
+above are no longer prompts, and Codex's IDE extensions wrap a person's words in the active file, the
+open tabs and every attachment, marking the words themselves with `## My request:` — the title uses
+that marker while the body keeps everything the model was given. The file name moves to the meta line,
+so it is still visible. Measured on the three rollouts: `rollout-2026-08-21T14-07-46-01a02401-…jsonl`
+→ "добавь в компонент …", `rollout-2026-09-03T12-42-17-…` → "запусти лаунчер".
+
+**A12. The list has to be right before it is clicked.** (§7, D14)
+Laziness was taken too far: the tree was built from filesystem metadata alone, so a row said
+`rollout-….jsonl`, sat under a directory-derived project and was sorted by mtime — and then, when the
+file was finally opened, learnt its real name, moved to the project its `cwd` names and re-sorted
+under the reader's cursor. Intake now also *peeks*: after the 64 KB vendor sniff it runs the real
+adapter over a bounded head of the file (`worker/peek.ts`, 256 KB) and keeps nothing but `SessionInfo`
+— name, `cwd`, own id, start time, thread lineage. Not a second implementation of naming to drift out
+of step with the first, and bounded because a Codex rollout buries the first human message ~80 KB in,
+past the sniff window, behind the runtime's preamble. Consequences: rows are ordered by when the
+session *started* rather than when the file was last written; a file that says nothing about itself
+keeps its file name and its mtime; and a Cursor `.vscdb` is the one exception, since reading a chat
+title out of it means walking the whole database.
+
+**A13. A dependent thread is not a session, so it is read as part of one.** (§2, §8.2, A10)
+A10 made a guardian review readable on its own. That is still the right answer when its parent is
+missing, but when both files are in the folder, reading a decision apart from the thing it decided
+about is the wrong unit of work. So `vendor/merge.ts` folds the child's events into the parent's
+timeline, in time order, each marked with the `lane` it came from; the child gets no row of its own in
+the sidebar but sits folded under its parent, and clicking it opens the parent at the thread's first
+event. The merge is vendor-neutral — it merges `CanonSession`s — and so is the lane: `Builder.finish`
+gives Claude's sidechains the same shape, which is where the per-thread breakdown of a Claude session
+comes from. Two rules keep it honest. Placement is by the thread's own clock, and a thread whose span
+does not overlap the session's is parked at the end under a segment that says so, never interleaved at
+a guessed position. And the totals are summed — one session means one number for what the work cost —
+with `metrics/threads.ts` reporting each lane's share beside them, because a sum with no breakdown
+hides the thing a reader wants next. The metrics cache key covers the threads merged in, so a session
+that gained a reviewer is not served the old total. One consequence had to be handled rather than
+designed away: intake opens the first readable file the moment it is sniffed, which is often before
+the rest of the folder has said what it is, so a session can be parsed without threads it turns out to
+have. `Loaded.childKey` records what was merged, and both `select` and the post-intake `restitch()`
+re-read a session whose set has changed — the alternative, holding the first open until every file in
+the folder is sniffed, makes dropping a single transcript slow to pay for a case that only arises in a
+folder.
+
+**A14. A list that measures after it has laid out has to settle, not wait for a scroll.** (§6.1)
+The virtualizer chose its window from the heights it knew, mounted that window, and only then measured
+what it had mounted — so any pass that corrected a height had answered a question its own window was
+computed from. Collapsing a row below the viewport's top row showed it: everything underneath moved
+up into view, none of it had been mounted, and the empty space stayed until the reader scrolled. The
+scroll anchor did not save it either, since that only shifts when a height *above* the anchor changes.
+`sync()` now repeats the mount-and-measure pass until nothing moves, capped at four. Cost is one extra
+measuring pass in the common case; it removes an interaction the reader had to perform to see their
+own screen.
+
+**A15. A subagent that writes its own file is still a lane, not a session.** (§2, A13)
+A13 built the dependent-thread machinery on the one case that existed then: a Codex guardian review.
+Claude Code turned out to have the same shape and be read wrongly by all of it. Newer versions no
+longer inline a subagent's work as `isSidechain` records inside the session — they write
+`<session>/subagents/agent-<id>.jsonl`, and every record in that file carries the *parent's*
+`sessionId` while the file's own identity is `agentId`. Taken at face value, five explorations became
+five top-level sessions, each named after the machine-written prompt the runtime gave it, all claiming
+to be the session they came out of. The adapter now reads `agentId` as the thread's own id and the
+recorded `sessionId` as what it serves, and only when the file *opens* as a thread — a session whose
+subagents are inline also has records with an `agentId`, halfway down. Two things follow. A file that
+is entirely one thread gets no lanes of its own: there is no main thread there to depart from, and
+tagging every row says nothing. And the link back to the call that asked for the work exists only on
+the call's *result* (`toolUseResult.agentId`), so `OpFacts.spawnedThread` carries it to the merge,
+where the lane is anchored to that op and named after the job it was given. The name also has to
+survive intake, before anything is parsed, and the job is recorded beside the thread rather than in it
+(`agent-<id>.meta.json`); `Registry.nameThreads` reads that sidecar. It names a lane and never a
+transcript, so A12's rule — the adapter is the only thing that says what a file *is* — still holds.
 
 ### 14.2 Not implemented
 
-- **Conversation stitching (§8.2).** Sessions are still one file each. Compactions are marked and
-  `compactRefs`/`sessionId`/`firstUuid`/`lastUuid` are captured in `SessionInfo` for it, but nothing
-  links two files yet. This is the largest remaining gap: a `--resume`d session currently reads as two
-  unrelated sessions.
+- **Conversation stitching (§8.2).** A *dependent* thread is now merged into the session it serves
+  (A13), but a *continued* one is not: a `--resume`d or compacted session still reads as two unrelated
+  files. The machinery is in place — `mergeThreads` and the lane model do not care where a thread came
+  from — and what is missing is the link: a continuation is a sequence, matched on
+  `compactRefs`/`firstUuid`/`lastUuid`, not a parent id.
 - **Persistent directory handles (§7.1).** `showDirectoryPicker()` is used where available, but the
   handle is not stored in IndexedDB, so every browser needs the folder re-picked after a reload.
 - **The redaction switch (§9.2).** Export honours `prefs.redactExports` and the report generator

@@ -14,10 +14,14 @@ import {
   canPickDirectory,
   filesFromInput,
   Registry,
+  sessionIdOf,
+  titleOf,
   walkDataTransfer,
   walkDirectoryHandle,
+  startOf,
   type FileEntry,
   type PickedFile,
+  type SessionNode,
 } from './intake.js';
 import { cacheSize, clearCache, getCached, putCached } from './store/cache.js';
 import { optionsFor, prefs, savePrefs, saveOverrides } from './store/prefs.js';
@@ -28,6 +32,7 @@ import { escapeHtml } from './view/markdown.js';
 import { bytesHuman, msHuman, relTime, tokensHuman } from './view/rows.js';
 import { Timeline, type Marker } from './view/timeline.js';
 import { Dock } from './view/dock/index.js';
+import { reviewNote } from './view/dock/review.js';
 import { compareReport, sessionReport } from './view/report.js';
 
 interface Loaded {
@@ -37,6 +42,13 @@ interface Loaded {
   metrics?: SessionMetrics;
   progress: number;
   failed?: string;
+  /**
+   * Which threads were merged in when this was parsed. Files arrive in whatever
+   * order the disk hands them over, so a session can be opened before the
+   * thread that belongs to it has even been sniffed; when that happens this no
+   * longer matches and the session has to be read again.
+   */
+  childKey?: string;
 }
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -67,6 +79,10 @@ const elParts = $('parts');
 
 const registry = new Registry();
 const loaded = new Map<string, Loaded>();
+/** a dependent thread the reader was asked to go to once the session is up */
+let wantedLane: string | null = null;
+/** project groups whose dependent threads are unfolded in the tree */
+const shownThreads = new Set<string>();
 const openOrder: string[] = [];
 const MAX_OPEN = 4;
 
@@ -171,21 +187,67 @@ async function addFiles(picked: PickedFile[]): Promise<void> {
       entry.vendor = res.result.vendor;
       entry.confidence = res.result.confidence;
       entry.reason = res.result.reason;
-      if (prefs().cacheEnabled) {
-        const cached = await getCached(entry.key);
-        if (cached) {
-          entry.metrics = cached;
-          entry.cached = true;
-        }
-      }
+      registry.identify(entry, res.result.identity);
       renderTree();
+      // Opening the first readable file immediately is what makes dropping one
+      // feel instant; it may turn out to have dependent threads that are still
+      // being sniffed, and `restitch` below deals with that.
       if (!firstOpened && entry.vendor !== 'unknown') {
         firstOpened = true;
         void select(entry);
       }
     }),
   );
+
+  // A dependent thread is named by the job it was sent to do, which is recorded
+  // beside it rather than in it.
+  await registry.nameThreads();
+
+  // Cached numbers come last, when the tree already knows which files belong
+  // together: a session's key covers the threads merged into it, and that is
+  // only knowable once every file has said what it is.
+  if (prefs().cacheEnabled) {
+    await Promise.all(
+      fresh.map(async (entry) => {
+        if (entry.metrics || entry.vendor === 'unknown' || registry.parentOf(entry)) return;
+        const cached = await getCached(registry.mergedKey(entry));
+        if (cached) {
+          entry.metrics = cached;
+          entry.cached = true;
+        }
+      }),
+    );
+  }
+  restitch();
   renderTree();
+}
+
+/**
+ * Re-read any open session whose threads were not yet known when it was parsed.
+ *
+ * The alternative is to hold the first open until every file in the folder has
+ * been sniffed, which makes dropping a single transcript feel slow to pay for a
+ * case that only arises when a folder holds a session and its reviewers.
+ */
+function restitch(): void {
+  for (const rec of [...loaded.values()]) {
+    if (rec.childKey === registry.mergedKey(rec.entry)) continue;
+    const n = registry.childrenOf(rec.entry).length;
+    const wasActive = active === rec;
+    drop(rec);
+    if (!wasActive) continue;
+    if (n) toast(`Reading ${n} dependent thread${n > 1 ? 's' : ''} into this session…`);
+    void select(rec.entry);
+  }
+}
+
+/** Give a session's worker back and forget it was parsed. */
+function drop(rec: Loaded): void {
+  rec.worker.terminate();
+  loaded.delete(rec.entry.id);
+  const at = openOrder.indexOf(rec.entry.id);
+  if (at >= 0) openOrder.splice(at, 1);
+  if (active === rec) active = null;
 }
 
 async function pickDirectory(): Promise<void> {
@@ -219,21 +281,45 @@ function evict(): void {
   }
 }
 
-async function select(entry: FileEntry): Promise<void> {
+/**
+ * Open a session.
+ *
+ * A dependent thread is not a session: clicking one opens the session it serves
+ * and goes to its work there (`lane`). The threads themselves travel with the
+ * parse request, because they are part of the timeline the worker is about to
+ * build, not separate files the reader opens later.
+ */
+async function select(entry: FileEntry, lane?: string): Promise<void> {
+  const parent = registry.parentOf(entry);
+  if (parent) return select(parent, sessionIdOf(entry));
+
   hits = null;
   elQ.value = '';
   timeline.setPinned(null);
   elPin.hidden = true;
+  wantedLane = lane ?? null;
 
   let rec = loaded.get(entry.id);
+  // A session parsed without the threads it turns out to have is not this
+  // session: read it again rather than showing a timeline with a hole in it.
+  if (rec && rec.childKey !== registry.mergedKey(entry)) {
+    drop(rec);
+    rec = undefined;
+  }
   if (!rec) {
     const worker = newWorker();
-    rec = { entry, worker, progress: 0 };
+    rec = { entry, worker, progress: 0, childKey: registry.mergedKey(entry) };
     worker.onmessage = (e: MessageEvent<FromWorker>) => onWorkerMessage(rec!, e.data);
     loaded.set(entry.id, rec);
     openOrder.push(entry.id);
     evict();
-    worker.postMessage({ type: 'parse', fileId: entry.id, file: entry.file, options: optionsFor(entry.key) } as ToWorker);
+    worker.postMessage({
+      type: 'parse',
+      fileId: entry.id,
+      file: entry.file,
+      options: optionsFor(entry.key),
+      children: registry.childrenOf(entry).map((e) => ({ id: e.id, file: e.file })),
+    } as ToWorker);
   } else {
     const at = openOrder.indexOf(entry.id);
     if (at >= 0) openOrder.splice(at, 1);
@@ -279,7 +365,7 @@ function onWorkerMessage(rec: Loaded, msg: FromWorker): void {
       rec.entry.project = msg.metrics.cwd ?? rec.entry.project;
       absorbCalibration(msg.metrics);
       if (prefs().cacheEnabled) {
-        void putCached(rec.entry.key, rec.entry.path, rec.entry.size, rec.entry.lastModified, msg.metrics);
+        void putCached(registry.mergedKey(rec.entry), rec.entry.path, rec.entry.size, rec.entry.lastModified, msg.metrics);
       }
       renderTree();
       if (rec === active) show(rec);
@@ -346,6 +432,16 @@ function show(rec: Loaded): void {
   renderTypes();
   renderPrompts();
   dock.setMetrics(rec.metrics ?? null);
+  goToLane(s);
+}
+
+/** Land on the thread that was clicked, now that it is part of this timeline. */
+function goToLane(s: CanonSession): void {
+  const lane = wantedLane;
+  wantedLane = null;
+  if (!lane) return;
+  const first = s.events.find((ev) => ev.lane === lane);
+  if (first) timeline.scrollToEvent(first.idx);
 }
 
 function renderMeta(rec: Loaded): void {
@@ -369,6 +465,9 @@ function renderMeta(rec: Loaded): void {
   const dur = s.info.endTs && s.info.startTs ? relTime(s.info.endTs, s.info.startTs).slice(1) : '';
   const parts = [
     s.info.vendor + (s.info.confidence < 0.5 ? ' (guessed)' : ''),
+    // The heading is the conversation's name now, so the file it came from has
+    // to be said somewhere.
+    s.info.title === s.info.name ? '' : s.info.name,
     s.info.startTs ? new Date(s.info.startTs).toLocaleString() : '',
     dur ? `${dur} elapsed` : '',
     `${s.events.length} events`,
@@ -385,30 +484,47 @@ function renderMeta(rec: Loaded): void {
 }
 
 /**
- * Some transcripts are not sessions. A thread that reviews another agent has
- * machine-written prompts and a subject that lives in a file the reader may not
- * have — so it says which file that is, and offers to open it when it is here.
- * The strip is not a modal: the thread is readable on its own, it just must not
- * be mistaken for the conversation it talks about.
+ * Some transcripts are not sessions.
+ *
+ * A thread that reviews another agent has machine-written prompts and a subject
+ * that lives in another file. When that file is here, the two are one timeline
+ * and this strip says which threads were folded in and where they start. When
+ * it is not, the strip says what is missing instead — the thread is readable on
+ * its own, it just must not be mistaken for the conversation it talks about.
  */
 function renderThread(s: CanonSession): void {
+  const lanes = s.lanes ?? [];
   const t = s.info.thread;
-  elThread.hidden = !t;
-  if (!t) return;
-  const parent = t.parentId
-    ? [...registry.entries.values()].find(
-        (e) => e.id !== s.info.id && (e.name.includes(t.parentId!) || e.metrics?.sessionId === t.parentId),
+  elThread.hidden = !t && !lanes.length;
+  if (lanes.length) {
+    const links = lanes
+      .map(
+        (l) =>
+          `<button class="ghost sm" data-lane="${escapeHtml(l.id)}" title="go to where this thread starts">` +
+          `${escapeHtml(l.label)} · ${l.events} events${l.detached ? ' · parked at the end' : ''}</button>`,
       )
-    : undefined;
+      .join(' ');
+    const detached = lanes.some((l) => l.detached);
+    elThread.innerHTML =
+      `<span><b>${lanes.length} dependent thread${lanes.length > 1 ? 's' : ''}</b> ` +
+      `${lanes.length > 1 ? 'are' : 'is'} part of this session: their events are in the timeline below and their ` +
+      `cost is in every total here. ` +
+      (detached ? `One of them carries a clock that does not overlap this session, so it sits at the end. ` : '') +
+      `${links}</span>`;
+    return;
+  }
+  if (!t) return;
+
+  // Reached only when the session it serves is not in this folder: with the
+  // parent present, clicking this file opens that one instead.
   const what =
     t.role === 'review'
       ? `<b>${escapeHtml(t.label)} thread</b> — every prompt below was written by the agent runtime, not by a person. ` +
         `The work being judged is in another session`
       : `<b>${escapeHtml(t.label)} thread</b> — this file is part of a larger session`;
   const where = t.parentId
-    ? parent
-      ? `, <button class="ghost sm" data-open="${escapeHtml(parent.id)}">open ${escapeHtml(parent.name)}</button>`
-      : `: <code>${escapeHtml(t.parentId)}</code>, which is not open here.`
+    ? `: <code>${escapeHtml(t.parentId)}</code>, which is not in this folder. Open it alongside this one and the ` +
+      `two are read as a single timeline.`
     : '.';
   elThread.innerHTML = `<span>${what}${where}</span>`;
 }
@@ -432,6 +548,19 @@ function applyMarkers(rec: Loaded): void {
 
   for (const ev of s.events) {
     if (ev.kind === 'compaction') put(ev.idx, { label: 'context compacted', kind: 'compaction' });
+  }
+  // Where a dependent thread first cuts in. Only the first run is marked: after
+  // that the indent and the lane's name on each row carry it, and a reviewer
+  // that woke up nine times would otherwise stripe the timeline with labels.
+  for (const lane of s.lanes ?? []) {
+    const first = s.events.find((ev) => ev.lane === lane.id);
+    if (!first) continue;
+    put(first.idx, {
+      label: lane.detached
+        ? `${lane.label} — its clock does not overlap this session, so it sits here`
+        : `${lane.label} — a dependent thread, read as part of this session`,
+      kind: 'thread',
+    });
   }
   if (m?.plan.detected) {
     for (const d of m.plan.diffs) {
@@ -493,7 +622,14 @@ elParts.addEventListener('change', (e) => {
 });
 
 elThread.addEventListener('click', (e) => {
-  const id = (e.target as HTMLElement).closest<HTMLElement>('[data-open]')?.dataset.open;
+  const target = e.target as HTMLElement;
+  const lane = target.closest<HTMLElement>('[data-lane]')?.dataset.lane;
+  if (lane && active?.session) {
+    const first = active.session.events.find((ev) => ev.lane === lane);
+    if (first) timeline.scrollToEvent(first.idx);
+    return;
+  }
+  const id = target.closest<HTMLElement>('[data-open]')?.dataset.open;
   const entry = id && registry.get(id);
   if (entry) void select(entry);
 });
@@ -567,7 +703,7 @@ async function analyzeEntry(entry: FileEntry): Promise<void> {
   entry.analyzing = true;
   renderTree();
   if (prefs().cacheEnabled) {
-    const cached = await getCached(entry.key);
+    const cached = await getCached(registry.mergedKey(entry));
     if (cached) {
       entry.metrics = cached;
       entry.cached = true;
@@ -582,6 +718,7 @@ async function analyzeEntry(entry: FileEntry): Promise<void> {
     id: entry.id,
     file: entry.file,
     options: optionsFor(entry.key),
+    children: registry.childrenOf(entry).map((e) => ({ id: e.id, file: e.file })),
   })) as Extract<FromWorker, { type: 'analyzed' }>;
   entry.analyzing = false;
   if (res.metrics) {
@@ -589,7 +726,7 @@ async function analyzeEntry(entry: FileEntry): Promise<void> {
     entry.project = res.metrics.cwd ?? entry.project;
     absorbCalibration(res.metrics);
     if (prefs().cacheEnabled) {
-      void putCached(entry.key, entry.path, entry.size, entry.lastModified, res.metrics);
+      void putCached(registry.mergedKey(entry), entry.path, entry.size, entry.lastModified, res.metrics);
     }
   } else {
     entry.reason = res.message ?? 'could not be analyzed';
@@ -603,7 +740,8 @@ async function analyzeAll(project: string): Promise<void> {
   if (analyzing) return;
   const group = registry.projects().find((p) => p.name === project);
   if (!group) return;
-  const todo = group.entries.filter((e) => !e.metrics);
+  // Sessions only: analyzing one reads the threads that belong to it too.
+  const todo = group.nodes.map((n) => n.entry).filter((e) => !e.metrics);
   if (!todo.length) return;
   analyzing = true;
   renderTree();
@@ -625,7 +763,15 @@ async function analyzeAll(project: string): Promise<void> {
 function summaryOf(e: FileEntry): string {
   const m = e.metrics;
   if (e.analyzing) return 'analyzing…';
-  if (!m) return bytesHuman(e.size);
+  // A thread that only decides has no operations to count, so the ops summary
+  // would read as an empty session; what it did is decide things. A session
+  // that merely *contains* such a thread still did its own work, and is
+  // summarized by that.
+  if (m?.thread?.role === 'review') return `${reviewNote(m.review)} · ${bytesHuman(e.size)}`;
+  if (!m) {
+    const label = e.identity?.thread?.label;
+    return label ? `${label} · ${bytesHuman(e.size)}` : bytesHuman(e.size);
+  }
   const bits = [
     m.tokens.headline.value !== null ? tokensHuman(m.tokens.headline.value) : `~${tokensHuman(m.tokens.contextCost.value ?? 0)}`,
     `${m.ops.totals.calls} ops`,
@@ -642,28 +788,15 @@ function renderTree(): void {
   }
   const html = groups
     .map((g) => {
-      const partial = g.analyzed < g.entries.length;
+      const partial = g.analyzed < g.nodes.length;
       const head =
         `<div class="pgrp"><b title="${escapeHtml(g.name)}">${escapeHtml(shorten(g.name))}</b>` +
-        `<span class="cnt">${g.analyzed} of ${g.entries.length} analyzed</span>` +
+        `<span class="cnt">${g.analyzed} of ${g.nodes.length} analyzed</span>` +
         (partial
           ? `<button class="ghost sm" data-analyze="${escapeHtml(g.name)}" ${analyzing ? 'disabled' : ''}>analyze all</button>`
           : '') +
         `</div>`;
-      const rows = g.entries
-        .map((e) => {
-          const on = e.id === active?.entry.id;
-          const cmp = compareWith && e.metrics?.key === compareWith.key ? ' cmp' : '';
-          return (
-            `<button class="sess${on ? ' on' : ''}${cmp}" data-id="${e.id}">` +
-            `<span class="vd v-${e.vendor ?? 'pending'}">${escapeHtml(e.vendor ?? '…')}</span>` +
-            `<b>${escapeHtml(e.metrics?.title ?? e.name)}</b>` +
-            `<span class="sub">${escapeHtml(summaryOf(e))}${e.cached ? ' · cached' : ''}</span>` +
-            `</button>`
-          );
-        })
-        .join('');
-      return head + rows;
+      return head + g.nodes.map(sessionRow).join('');
     })
     .join('');
 
@@ -683,6 +816,50 @@ function renderTree(): void {
   elTree.innerHTML = html + unknownHtml;
 }
 
+/**
+ * One session, with its dependent threads under it.
+ *
+ * The children are folded away by default: they are not separate things to
+ * read — opening one opens this session at the thread's own work — and a folder
+ * where every session spawned a reviewer would otherwise be twice as long for
+ * no extra information.
+ */
+function sessionRow(node: SessionNode): string {
+  const e = node.entry;
+  const open = shownThreads.has(e.id);
+  const on = e.id === active?.entry.id;
+  const cmp = compareWith && e.metrics?.key === compareWith.key ? ' cmp' : '';
+  const subs = node.children.length
+    ? `<span class="thr" data-threads="${e.id}" role="button" tabindex="0" ` +
+      `title="${node.children.length} dependent thread${node.children.length > 1 ? 's' : ''} — read as part of this session">` +
+      `${open ? '▾' : '▸'} ${node.children.length} sub</span>`
+    : '';
+  const row =
+    `<button class="sess${on ? ' on' : ''}${cmp}" data-id="${e.id}">` +
+    `<span class="vd v-${e.vendor ?? 'pending'}">${escapeHtml(e.vendor ?? '…')}</span>` +
+    `<b>${escapeHtml(titleOf(e))}</b>` +
+    subs +
+    `<span class="sub">${escapeHtml(summaryOf(e))}${e.cached ? ' · cached' : ''}</span>` +
+    `</button>`;
+  if (!open) return row;
+  return (
+    row +
+    node.children
+      .map((c) => {
+        const thread = c.identity?.thread ?? c.metrics?.thread;
+        const when = startOf(c) ? new Date(startOf(c)).toLocaleTimeString() : '';
+        return (
+          `<button class="sess sub-thr" data-id="${c.id}" title="open this session at ${escapeHtml(c.name)}">` +
+          `<span class="vd v-thread">${escapeHtml(thread?.role ?? 'thread')}</span>` +
+          `<b>${escapeHtml(thread?.label ?? titleOf(c))}</b>` +
+          `<span class="sub">${escapeHtml([when, bytesHuman(c.size)].filter(Boolean).join(' · '))}</span>` +
+          `</button>`
+        );
+      })
+      .join('')
+  );
+}
+
 function shorten(name: string): string {
   const parts = name.split('/').filter(Boolean);
   return parts.length > 2 ? '…/' + parts.slice(-2).join('/') : name;
@@ -693,6 +870,13 @@ elTree.addEventListener('click', (e) => {
   const project = target.closest<HTMLElement>('[data-analyze]')?.dataset.analyze;
   if (project) {
     void analyzeAll(project);
+    return;
+  }
+  const threads = target.closest<HTMLElement>('[data-threads]')?.dataset.threads;
+  if (threads) {
+    if (shownThreads.has(threads)) shownThreads.delete(threads);
+    else shownThreads.add(threads);
+    renderTree();
     return;
   }
   const id = target.closest<HTMLElement>('.sess')?.dataset.id;
