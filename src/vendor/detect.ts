@@ -2,7 +2,7 @@
  * Vendor sniffing.
  *
  * Never by file extension: transcripts get renamed, exported and hand-moved, and
- * three different products write `.jsonl`. Detection reads the first 64 KB (and
+ * several different products write `.jsonl`. Detection reads the first 64 KB (and
  * the 16-byte SQLite magic) and says how sure it is, so the intake UI can show
  * *why* a file was classified the way it was — or list it as unrecognized with
  * its first line, rather than silently ignoring it.
@@ -36,6 +36,13 @@ const CLAUDE_TYPES = new Set([
   'file-history-snapshot',
 ]);
 const CODEX_TYPES = new Set(['response_item', 'event_msg', 'session_meta', 'turn_context']);
+const KIMI_TYPES = new Set([
+  'context.append_loop_event',
+  'context.append_message',
+  'context.apply_compaction',
+  'turn.prompt',
+  'usage.record',
+]);
 
 export function detectFromText(head: string): Detection {
   if (head.startsWith(SQLITE_MAGIC)) {
@@ -46,6 +53,7 @@ export function detectFromText(head: string): Detection {
   let claude = 0;
   let codex = 0;
   let cursor = 0;
+  let kimi = 0;
   let parsed = 0;
 
   for (const line of lines) {
@@ -63,6 +71,10 @@ export function detectFromText(head: string): Detection {
     if (rec.message && Array.isArray(rec.message.content)) claude++;
     if (rec.composerId || rec.bubbleId || rec.composers || rec.fullConversationHeadersOnly) cursor += 3;
     if (Array.isArray(rec.bubbles) || Array.isArray(rec.conversation)) cursor += 2;
+    if (KIMI_TYPES.has(rec.type) && (rec.agentId || rec.event || rec.message || rec.usage)) kimi += 2;
+    if (rec.type === 'metadata' && rec.protocol_version && rec.created_at) kimi += 2;
+    if (rec.type === 'context.append_loop_event' && typeof rec.event?.type === 'string') kimi++;
+    if (rec.type === 'usage.record' && rec.usage && 'inputOther' in rec.usage) kimi++;
   }
 
   const sample = lines[0]?.slice(0, 240);
@@ -74,10 +86,11 @@ export function detectFromText(head: string): Detection {
     return { vendor: 'unknown', confidence: 0, reason: 'not JSONL', sample };
   }
 
-  const best = Math.max(claude, codex, cursor);
+  const best = Math.max(claude, codex, cursor, kimi);
   if (best === 0) return { vendor: 'unknown', confidence: 0, reason: 'unrecognized JSONL', sample };
-  const total = claude + codex + cursor;
+  const total = claude + codex + cursor + kimi;
   const confidence = Math.min(1, (best / total) * Math.min(1, parsed / 5) + 0.15);
+  if (best === kimi) return { vendor: 'kimi', confidence, reason: 'kimi code wire records' };
   if (best === codex) return { vendor: 'codex', confidence, reason: 'codex rollout records' };
   if (best === cursor) return { vendor: 'cursor', confidence, reason: 'cursor chat export' };
   return { vendor: 'claude', confidence, reason: 'claude code transcript' };

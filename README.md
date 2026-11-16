@@ -1,6 +1,6 @@
 # Project Reader
 
-A browser tool for reading **and analyzing** the sessions you ran with Claude Code, Codex or Cursor.
+A browser tool for reading **and analyzing** the sessions you ran with Claude Code, Codex, Cursor or Kimi Code.
 
 Drop a transcript (or open a whole folder of them) and get the run back as a chronological, readable
 timeline — prompts, replies, commands and their output, diffs, screenshots — plus an analytics dock
@@ -168,6 +168,7 @@ src/
     claude.ts            Claude Code .jsonl (reference implementation)
     codex.ts             Codex rollout .jsonl (experimental)
     cursor.ts            Cursor state.vscdb / exported chat (experimental)
+    kimi.ts              Kimi Code wire.jsonl, protocol 1.5 (main agent)
     sqlite.ts            a read-only SQLite b-tree reader, no dependencies
     builder.ts           body clipping, the worker's body store, quality counters
     text.ts              shared text helpers (command heads, diffs, paths)
@@ -205,7 +206,8 @@ tools/
   scenario.mjs           a small awkward transcript plus the ground truth for every metric
 test/
   parser.test.mjs        line splitting, text helpers, categories, height index, markdown
-  adapters.test.mjs      all three adapters, the SQLite reader, vendor detection
+  adapters.test.mjs      Claude, Codex and Cursor adapters, SQLite, vendor detection
+  kimi.test.mjs          Kimi wire events, usage, diffs, questions and state sidecars
   metrics.test.mjs       every metric against the scenario's known answers, plus invariants
   view.test.mjs          panels render, provenance survives, transcript text stays escaped
   example.test.mjs       the real 5.7 MB transcript: invariants and estimator calibration
@@ -302,6 +304,15 @@ test/
   and anchored to the call that asked for it. A file written this way records its parent's session id
   and not its own, so left unread it looks like a separate session with a machine-written first
   prompt; five explorations become five sessions in the list. They do not here.
+- **Kimi Code** support reads `agents/main/wire.jsonl` from protocol 1.5 sessions, or a standalone
+  `wire.jsonl`. The canonical timeline comes from `context.append_loop_event` plus human messages;
+  materialized messages and request traces are not counted a second time. Turn usage arrives before
+  the response and is attached at `step.end`; session totals are ignored. Commands, file diffs,
+  `TodoList` revisions, questions, compactions, timings and reported tokens are supported. A sibling
+  `state.json` supplies the session title, project and id, and is covered by the metrics cache key.
+  Subagent merging, Plan-mode file reconstruction and ZIP exports are not implemented yet; unpack a
+  `kimi export` archive first. Media rendering is supported for recorded image blocks, but real
+  Kimi media captures still need validation.
 - **Cursor** records no token usage at all and often no per-message timestamps, so its token figures
   are estimated, its durations are mostly unavailable, and its busy clock does not exist. Its schema
   is undocumented and moves between versions; both adapters are labelled experimental until they have

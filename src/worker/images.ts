@@ -53,12 +53,52 @@ const DATA_URL = /^data:([^;,]+)?(;base64)?,(.*)$/s;
  * Codex puts them straight in a message's content as data: URLs.
  */
 export async function extractImages(rec: any): Promise<number> {
+  if (rec?.type === 'context.append_message' && Array.isArray(rec?.message?.content)) {
+    return fromKimi(rec.message.content);
+  }
+  if (rec?.type === 'context.append_loop_event' && Array.isArray(rec?.event?.result?.output)) {
+    return fromKimi(rec.event.result.output);
+  }
   const claude = rec?.message?.content;
   if (Array.isArray(claude)) return fromClaude(claude);
   const payload = rec?.payload;
   if (Array.isArray(payload?.content)) return fromCodex(payload.content);
   if (Array.isArray(payload?.output)) return fromCodex(payload.output);
   return 0;
+}
+
+async function fromKimi(content: any[]): Promise<number> {
+  let n = 0;
+  for (const part of content) {
+    if (!part || typeof part !== 'object' || !/image/.test(String(part.type ?? ''))) continue;
+    const src = part.source;
+    if (src?.type === 'base64' && typeof src.data === 'string') {
+      const ref = await toRef(src.data, src.media_type);
+      src.data = '';
+      if (ref) {
+        part.__img = ref;
+        n++;
+      }
+      continue;
+    }
+    const url = part.image_url ?? part.url ?? src?.url;
+    if (typeof url !== 'string' || !url) continue;
+    const m = DATA_URL.exec(url);
+    if (m && m[2]) {
+      const ref = await toRef(m[3], m[1] ?? 'image/png');
+      if (part.image_url) part.image_url = '';
+      else if (part.url) part.url = '';
+      else if (src) src.url = '';
+      if (ref) {
+        part.__img = ref;
+        n++;
+      }
+    } else if (!m) {
+      part.__img = { url, w: 0, h: 0, bytes: 0 } satisfies ImageRef;
+      n++;
+    }
+  }
+  return n;
 }
 
 async function fromClaude(content: any[]): Promise<number> {

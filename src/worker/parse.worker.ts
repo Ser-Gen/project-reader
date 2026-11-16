@@ -8,14 +8,15 @@
  * searches and metric recomputation without touching the file again.
  */
 
-import type { CanonSession, SessionPart } from '../model/canon.js';
+import type { CanonSession, SessionInfo, SessionPart } from '../model/canon.js';
 import type { MetricOptions, SessionMetrics } from '../model/metrics.js';
-import type { FromWorker, SearchHit, ToWorker } from '../model/protocol.js';
+import type { FromWorker, SearchHit, SessionIdentity, ToWorker } from '../model/protocol.js';
 import { computeMetrics } from '../metrics/index.js';
 import { detectFile, type Detection } from '../vendor/detect.js';
 import { ClaudeAdapter, fullBody as claudeBody } from '../vendor/claude.js';
 import { CodexAdapter, fullBody as codexBody } from '../vendor/codex.js';
 import { CursorAdapter, MAX_DB_BYTES, parseExportedChat, readCursorDb } from '../vendor/cursor.js';
+import { KimiAdapter, fullBody as kimiBody } from '../vendor/kimi.js';
 import type { Builder, EventSource } from '../vendor/builder.js';
 import { mergeThreads } from '../vendor/merge.js';
 import { readLine, streamLines } from './jsonl.js';
@@ -38,7 +39,7 @@ self.onmessage = (e: MessageEvent<ToWorker>) => {
   const msg = e.data;
   switch (msg.type) {
     case 'parse':
-      void parse(msg.fileId, msg.file, msg.options, msg.part, msg.children);
+      void parse(msg.fileId, msg.file, msg.options, msg.part, msg.children, msg.identity);
       break;
     case 'expand':
       void expand(msg.fileId, msg.reqId, msg.idx);
@@ -53,7 +54,7 @@ self.onmessage = (e: MessageEvent<ToWorker>) => {
       void sniff(msg.reqId, msg.id, msg.file);
       break;
     case 'analyze':
-      void analyze(msg.reqId, msg.id, msg.file, msg.options, msg.children);
+      void analyze(msg.reqId, msg.id, msg.file, msg.options, msg.children, msg.identity);
       break;
     case 'close':
       sessions.delete(msg.fileId);
@@ -103,6 +104,7 @@ async function build(
   options: MetricOptions,
   part: string | undefined,
   onProgress?: (bytes: number) => void,
+  identity?: SessionIdentity,
 ): Promise<Parsed> {
   const t0 = performance.now();
   const det = await detectFile(file);
@@ -113,7 +115,8 @@ async function build(
   }
 
   const adapter =
-    det.vendor === 'codex' ? new CodexAdapter(fileId, file.name, file.size, det.confidence, cal)
+    det.vendor === 'kimi' ? new KimiAdapter(fileId, file.name, file.size, det.confidence, cal)
+    : det.vendor === 'codex' ? new CodexAdapter(fileId, file.name, file.size, det.confidence, cal)
     : det.vendor === 'cursor' ? null
     : new ClaudeAdapter(fileId, file.name, file.size, det.confidence, cal);
 
@@ -134,7 +137,7 @@ async function build(
       continue;
     }
     // Only pay for the async image walk on records that actually carry one.
-    // Claude writes `"type":"base64"`, Codex a `data:image/…;base64,` URL.
+    // Claude writes `"type":"base64"`; Codex and Kimi also use data-URL or result-block forms.
     if (line.text.length > 1024 && line.text.includes('base64')) {
       await extractImages(rec);
     }
@@ -143,7 +146,17 @@ async function build(
   if (!lines) adapter.b.note('The file is empty.');
 
   const session = adapter.finish(Math.round(performance.now() - t0));
+  applyIdentity(session.info, identity);
   return { builder: adapter.b, session, vendor: det.vendor };
+}
+
+function applyIdentity(info: SessionInfo, identity?: SessionIdentity): void {
+  if (!identity) return;
+  if (identity.title) info.title = identity.title;
+  if (identity.cwd) info.cwd = identity.cwd;
+  if (identity.sessionId) info.sessionId = identity.sessionId;
+  if (!info.startTs && identity.startTs) info.startTs = identity.startTs;
+  if (!info.model && identity.model) info.model = identity.model;
 }
 
 /** Metrics are computed from whatever the session ended up being — merged or not. */
@@ -201,6 +214,7 @@ async function parse(
   options: MetricOptions,
   part?: string,
   children?: { id: string; file: File }[],
+  identity?: SessionIdentity,
 ): Promise<void> {
   let lastPost = 0;
   const onProgress = (bytes: number) => {
@@ -212,7 +226,7 @@ async function parse(
   };
 
   try {
-    const main = await build(fileId, file, options, part, onProgress);
+    const main = await build(fileId, file, options, part, onProgress, identity);
     let session = main.session;
     let sources: EventSource[] = main.builder.sources;
 
@@ -251,9 +265,10 @@ async function analyze(
   file: File,
   options: MetricOptions,
   children?: { id: string; file: File }[],
+  identity?: SessionIdentity,
 ): Promise<void> {
   try {
-    const parsed = await build(id, file, options, undefined);
+    const parsed = await build(id, file, options, undefined, undefined, identity);
     let session = parsed.session;
     if (children?.length) {
       const threads = [];
@@ -306,7 +321,7 @@ async function expand(fileId: string, reqId: number, idx: number): Promise<void>
   try {
     const text = await readLine(src.file ?? st.file, src.start, src.end);
     const rec = JSON.parse(text);
-    const body = st.vendor === 'codex' ? codexBody(rec, src) : claudeBody(rec, src);
+    const body = st.vendor === 'kimi' ? kimiBody(rec, src) : st.vendor === 'codex' ? codexBody(rec, src) : claudeBody(rec, src);
     post({ type: 'expanded', fileId, reqId, body });
   } catch {
     post({ type: 'expanded', fileId, reqId, body: '' });

@@ -12,7 +12,7 @@ Project Reader today is a *reader*: drop a Claude Code `.jsonl` transcript, get 
 richly rendered timeline. That engine stays.
 
 This spec adds the second half of the product: an **analyzer**. It answers, for any agent session —
-Claude Code, Cursor, or Codex — questions the raw transcript cannot:
+Claude Code, Cursor, Codex, or Kimi Code — questions the raw transcript cannot:
 
 1. How many tokens went into each operation, and where did the budget actually go?
 2. Which operations ran, how often, how long did they take, how often did they fail?
@@ -84,6 +84,7 @@ src/
     claude.ts                Claude Code .jsonl adapter          (reference impl)
     codex.ts                 Codex rollout .jsonl adapter        (experimental)
     cursor.ts                Cursor state.vscdb / export adapter (experimental)
+    kimi.ts                  Kimi Code wire.jsonl adapter (protocol 1.5, main agent)
     sqlite.ts                lazy sql.js loader + Cursor query layer
   metrics/
     tokens.ts                token accounting, both models, calibration
@@ -118,7 +119,7 @@ Every vendor collapses into this. **Metrics are computed from `CanonEvent[]` onl
 may ever branch on vendor. That rule is what keeps cross-agent comparison honest.
 
 ```ts
-type Vendor = 'claude' | 'codex' | 'cursor';
+type Vendor = 'claude' | 'codex' | 'cursor' | 'kimi';
 
 type CanonKind =
   | 'prompt'      // human message
@@ -202,6 +203,7 @@ interface CanonEvent {
 | Claude Code | JSONL; records carry `uuid` + `sessionId` and `type` in `assistant\|user\|system\|attachment\|mode\|file-history-*`; assistant records have `message.content[]` |
 | Codex | JSONL; records shaped `{ timestamp, type: "response_item" \| "event_msg" \| "session_meta", payload }` |
 | Cursor | SQLite (`SQLite format 3\0` magic) containing `ItemTable` / `cursorDiskKV`; **or** an exported chat JSON/Markdown |
+| Kimi Code | JSONL; `metadata.protocol_version`, `context.append_loop_event`, `context.append_message` and `usage.record` with Kimi usage fields |
 
 Unrecognized files are listed in the intake UI as *unrecognized*, with the sniffed first line shown,
 rather than being silently ignored.
@@ -257,6 +259,27 @@ Two intake paths, in priority order:
 refused with an explicit message pointing at the export path; above **128 MB** the user gets a
 warning and an explicit confirm. The sql.js bundle is `import()`-ed only when a SQLite file is opened,
 so no Cursor code costs anything to Claude/Codex users.
+
+---
+
+### 4.5 Kimi Code (protocol 1.5, main agent)
+
+- Sessions live under `~/.kimi-code/sessions/<workDirKey>/<sessionId>/`; the main stream is
+  `agents/main/wire.jsonl`, and `state.json` supplies title, `cwd`, session id and creation time.
+- `context.append_loop_event` is the canonical message/tool stream. `agent.message.appended`,
+  `turn.prompt` and `llm.request` are materialized copies or request traces and must not produce a
+  second timeline. Human prompts come from `context.append_message` with `origin.kind = "user"`.
+- `tool.call` and `tool.result` pair by `toolCallId`; results carry output, duration and error state.
+  `Edit.display.before/after` and `Write.display.content` provide renderable diffs. A `replace_all`
+  edit does not report line totals when the number of replacements is unknown.
+- `usage.record` with `usageScope = "turn"` arrives before the response and is attached at `step.end`;
+  `step.end.usage` is the fallback when no usage record exists. `usageScope = "session"` is a total,
+  never another request. Fields map to `inputOther`, `inputCacheCreation`, `inputCacheRead`, `output`.
+- `TodoList` produces plan-tool revisions, `AskUserQuestion` uses the shared question format, and
+  `context.apply_compaction` produces a compaction marker with its summary and token counts.
+- Current limits: subagent files are not merged, Plan-mode files and approval are not reconstructed,
+  and `kimi export` ZIP archives must be unpacked before opening. These gaps are stated here rather
+  than filled with guessed lineage or plan data.
 
 ---
 
@@ -725,9 +748,9 @@ stages.
   every op is in exactly one phase; no metric is `NaN`, and `null` never renders as `0`.
 - **Calibration test** — heuristic estimate vs reported usage on Claude fixtures; asserts ≤10% median
   absolute error (§5.4) and fails the build if the divisors drift out of the bounded range.
-- **Adapter conformance** — one shared suite run against all three adapters, asserting the canonical
+- **Adapter conformance** — one shared suite run against every adapter, asserting the canonical
   invariants (ordering, pairing, category coverage, no vendor leakage into metric code).
-- **Cross-vendor equivalence** — the same logical session expressed in all three formats must produce
+- **Cross-vendor equivalence** — the same logical session expressed in different vendor formats must produce
   matching category-level counts; this is the test that proves the canonical model actually normalizes.
 - Existing parser, Fenwick and markdown-escaping tests stay.
 
@@ -976,6 +999,13 @@ where the lane is anchored to that op and named after the job it was given. The 
 survive intake, before anything is parsed, and the job is recorded beside the thread rather than in it
 (`agent-<id>.meta.json`); `Registry.nameThreads` reads that sidecar. It names a lane and never a
 transcript, so A12's rule — the adapter is the only thing that says what a file *is* — still holds.
+
+**A16. Kimi Code protocol 1.5 joins through the same canonical boundary.** (§4.5)
+The main-agent `wire.jsonl` adapter produces prompts, prose, reasoning, operations, diffs, questions,
+TodoList revisions and compactions. It keeps turn usage separate from session totals and attaches the
+early usage record at `step.end`, while `state.json` supplies intake identity without becoming a
+transcript. Metrics remain vendor-neutral. Subagent merging, Plan-mode reconstruction and ZIP intake
+remain explicitly unimplemented until representative files are available.
 
 ### 14.2 Not implemented
 

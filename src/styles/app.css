@@ -190,6 +190,7 @@ html, body {
 .v-claude { color: var(--c-plan); border-color: color-mix(in srgb, var(--c-plan) 45%, var(--line)); }
 .v-codex { color: var(--c-bash); border-color: color-mix(in srgb, var(--c-bash) 45%, var(--line)); }
 .v-cursor { color: var(--c-web); border-color: color-mix(in srgb, var(--c-web) 45%, var(--line)); }
+.v-kimi { color: var(--c-read); border-color: color-mix(in srgb, var(--c-read) 45%, var(--line)); }
 
 .picks { display: flex; gap: 4px; }
 .side-note { padding: 6px 12px; color: var(--fg-faint); font-size: 11px; border-top: 1px solid var(--line); }

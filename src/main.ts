@@ -169,6 +169,7 @@ async function addFiles(picked: PickedFile[]): Promise<void> {
     const entry = registry.add(p.file, p.path);
     if (entry && entry.vendor === null) fresh.push(entry);
   }
+  await registry.hydrateKimiMetadata();
   if (!fresh.length) {
     if (!registry.entries.size) toast('Nothing in there looked like a transcript.');
     return;
@@ -319,6 +320,7 @@ async function select(entry: FileEntry, lane?: string): Promise<void> {
       file: entry.file,
       options: optionsFor(entry.key),
       children: registry.childrenOf(entry).map((e) => ({ id: e.id, file: e.file })),
+      identity: entry.identity ?? undefined,
     } as ToWorker);
   } else {
     const at = openOrder.indexOf(entry.id);
@@ -408,8 +410,8 @@ function onWorkerMessage(rec: Loaded, msg: FromWorker): void {
 }
 
 /**
- * Keep the estimator honest: Claude reports real usage, so each session it
- * parses refines the per-class divisors that Cursor and Codex then inherit.
+ * Keep the estimator honest: sessions with reported usage refine the per-class
+ * divisors that formats without those measurements then inherit.
  */
 function absorbCalibration(m: SessionMetrics): void {
   const cal = m.quality.calibration;
@@ -719,6 +721,7 @@ async function analyzeEntry(entry: FileEntry): Promise<void> {
     file: entry.file,
     options: optionsFor(entry.key),
     children: registry.childrenOf(entry).map((e) => ({ id: e.id, file: e.file })),
+    identity: entry.identity ?? undefined,
   })) as Extract<FromWorker, { type: 'analyzed' }>;
   entry.analyzing = false;
   if (res.metrics) {

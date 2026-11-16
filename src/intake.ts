@@ -92,6 +92,8 @@ export function titleOf(e: FileEntry): string {
  * the job can be read before anything is parsed, which is what the list needs.
  */
 const SIDECAR = /(?:^|\/)agent-([A-Za-z0-9_-]+)\.meta\.json$/i;
+const KIMI_STATE = /(?:^|\/)state\.json$/i;
+const KIMI_WIRE = /(?:^|\/)agents\/main\/wire\.jsonl$/i;
 
 const TEXT_EXT = /\.(jsonl|json|log|md|txt)$/i;
 const DB_EXT = /\.(vscdb|sqlite|db)$/i;
@@ -126,10 +128,16 @@ export class Registry {
   readonly entries = new Map<string, FileEntry>();
   /** thread id -> the runtime's own note about what that thread was asked to do */
   private readonly sidecars = new Map<string, File>();
+  private readonly kimiStates = new Map<string, { file: File; path: string }>();
+  private readonly metadataKeys = new Map<string, string>();
   private seq = 0;
 
   add(file: File, path: string): FileEntry | null {
     const rel = path || file.name;
+    if (KIMI_STATE.test(rel)) {
+      this.kimiStates.set(rel.slice(0, rel.length - 'state.json'.length), { file, path: rel });
+      return null;
+    }
     if (!isCandidate(rel, file.size)) return null;
     const sidecar = SIDECAR.exec(rel);
     if (sidecar) {
@@ -163,10 +171,60 @@ export class Registry {
     return this.entries.get(id);
   }
 
-  /** Apply what the head of the file said about itself. */
+  /** Kimi keeps the title, project and session id beside the wire, not inside it. */
+  async hydrateKimiMetadata(): Promise<void> {
+    await Promise.all(
+      [...this.entries.values()].map(async (entry) => {
+        const wire = KIMI_WIRE.exec(entry.path);
+        if (!wire) return;
+        const prefix = entry.path.slice(0, entry.path.length - 'agents/main/wire.jsonl'.length);
+        const state = this.kimiStates.get(prefix);
+        if (!state) return;
+        try {
+          const raw = JSON.parse(await state.file.text());
+          const identity: SessionIdentity = {
+            title: typeof raw?.title === 'string' && raw.title.trim() ? raw.title : undefined,
+            cwd: typeof raw?.cwd === 'string' && raw.cwd ? raw.cwd : undefined,
+            sessionId:
+              typeof raw?.id === 'string' && raw.id
+                ? raw.id
+                : entry.path.split('/').find((part) => /^session_/.test(part)),
+            startTs: typeof raw?.createdAt === 'number' ? raw.createdAt : undefined,
+            complete: false,
+          };
+          entry.identity = {
+            title: identity.title ?? entry.identity?.title,
+            cwd: identity.cwd ?? entry.identity?.cwd,
+            sessionId: identity.sessionId ?? entry.identity?.sessionId,
+            thread: entry.identity?.thread,
+            startTs: entry.identity?.startTs ?? identity.startTs,
+            model: entry.identity?.model,
+            complete: entry.identity?.complete ?? false,
+          };
+          this.metadataKeys.set(entry.id, cacheKey(state.path, state.file.size, state.file.lastModified));
+          if (identity.cwd) entry.project = identity.cwd;
+        } catch {
+          /* a wire without a readable sidecar is still a session */
+        }
+      }),
+    );
+  }
+
+  /** Apply what the head of the file said about itself, preserving sidecar metadata. */
   identify(entry: FileEntry, identity: SessionIdentity): void {
-    entry.identity = identity;
-    if (identity.cwd) entry.project = identity.cwd;
+    const prior = entry.identity;
+    entry.identity = prior
+      ? {
+          ...identity,
+          title: prior.title ?? identity.title,
+          cwd: prior.cwd ?? identity.cwd,
+          sessionId: prior.sessionId ?? identity.sessionId,
+          thread: prior.thread ?? identity.thread,
+          startTs: identity.startTs ?? prior.startTs,
+          model: prior.model ?? identity.model,
+        }
+      : identity;
+    if (entry.identity.cwd) entry.project = entry.identity.cwd;
   }
 
   /**
@@ -219,7 +277,8 @@ export class Registry {
    */
   mergedKey(entry: FileEntry): string {
     const kids = this.childrenOf(entry);
-    return kids.length ? `${entry.key}+${kids.map((k) => k.key).join('+')}` : entry.key;
+    const own = this.metadataKeys.has(entry.id) ? `${entry.key}+${this.metadataKeys.get(entry.id)}` : entry.key;
+    return kids.length ? `${own}+${kids.map((k) => k.key).join('+')}` : own;
   }
 
   /** The dependent threads whose work belongs in this session's timeline. */

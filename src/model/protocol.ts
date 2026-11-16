@@ -55,6 +55,7 @@ export type ToWorker =
       options: MetricOptions;
       part?: string;
       children?: { id: string; file: File }[];
+      identity?: SessionIdentity;
     }
   | { type: 'expand'; fileId: string; reqId: number; idx: number }
   | { type: 'search'; fileId: string; reqId: number; query: string }
@@ -72,6 +73,7 @@ export type ToWorker =
       file: File;
       options: MetricOptions;
       children?: { id: string; file: File }[];
+      identity?: SessionIdentity;
     }
   | { type: 'close'; fileId: string };
 
