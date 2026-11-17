@@ -17,6 +17,7 @@ import { ClaudeAdapter, fullBody as claudeBody } from '../vendor/claude.js';
 import { CodexAdapter, fullBody as codexBody } from '../vendor/codex.js';
 import { CursorAdapter, MAX_DB_BYTES, parseExportedChat, readCursorDb } from '../vendor/cursor.js';
 import { KimiAdapter, fullBody as kimiBody } from '../vendor/kimi.js';
+import { ZcodeAdapter, MAX_DB_BYTES as ZCODE_MAX, readZcodeDb, partsOf as zcodeParts } from '../vendor/zcode.js';
 import type { Builder, EventSource } from '../vendor/builder.js';
 import { mergeThreads } from '../vendor/merge.js';
 import { readLine, streamLines } from './jsonl.js';
@@ -39,7 +40,7 @@ self.onmessage = (e: MessageEvent<ToWorker>) => {
   const msg = e.data;
   switch (msg.type) {
     case 'parse':
-      void parse(msg.fileId, msg.file, msg.options, msg.part, msg.children, msg.identity);
+      void parse(msg.fileId, msg.file, msg.options, msg.part, msg.children, msg.identity, msg.wal);
       break;
     case 'expand':
       void expand(msg.fileId, msg.reqId, msg.idx);
@@ -54,7 +55,7 @@ self.onmessage = (e: MessageEvent<ToWorker>) => {
       void sniff(msg.reqId, msg.id, msg.file);
       break;
     case 'analyze':
-      void analyze(msg.reqId, msg.id, msg.file, msg.options, msg.children, msg.identity);
+      void analyze(msg.reqId, msg.id, msg.file, msg.options, msg.children, msg.identity, msg.wal);
       break;
     case 'close':
       sessions.delete(msg.fileId);
@@ -105,6 +106,7 @@ async function build(
   part: string | undefined,
   onProgress?: (bytes: number) => void,
   identity?: SessionIdentity,
+  wal?: File,
 ): Promise<Parsed> {
   const t0 = performance.now();
   const det = await detectFile(file);
@@ -112,6 +114,9 @@ async function build(
 
   if (det.vendor === 'cursor' && det.reason.startsWith('SQLite')) {
     return cursorDb(fileId, file, options, part, det, t0);
+  }
+  if (det.vendor === 'zcode') {
+    return zcodeDb(fileId, file, options, part, det, t0, wal);
   }
 
   const adapter =
@@ -208,6 +213,37 @@ async function cursorExport(
   return { builder: adapter.b, session, vendor: 'cursor' };
 }
 
+/**
+ * ZCode keeps every session in one SQLite database, one row per message and
+ * per part; the reader opens one session at a time and offers the rest as parts.
+ *
+ * The `-wal` sidecar is not replayed; its size is what the quality note says,
+ * so the gap is visible rather than silent.
+ */
+async function zcodeDb(
+  fileId: string,
+  file: File,
+  options: MetricOptions,
+  part: string | undefined,
+  det: Detection,
+  t0: number,
+  wal?: File,
+): Promise<Parsed> {
+  if (file.size > ZCODE_MAX) {
+    throw new Error(
+      `This ZCode database is ${(file.size / 1024 / 1024).toFixed(0)} MB. Walking it requires holding it in memory.`,
+    );
+  }
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const { sessions, notes } = readZcodeDb(bytes, wal?.size ?? 0);
+  if (!sessions.length) throw new Error('No readable ZCode sessions in this database.');
+  const picked = sessions.find((s) => s.id === part) ?? sessions[0];
+  const parts = zcodeParts(sessions);
+  const adapter = new ZcodeAdapter(fileId, file.name, file.size, det.confidence, options.calibration ?? {});
+  const session = adapter.build(picked, parts, notes, Math.round(performance.now() - t0));
+  return { builder: adapter.b, session, vendor: 'zcode' };
+}
+
 async function parse(
   fileId: string,
   file: File,
@@ -215,6 +251,7 @@ async function parse(
   part?: string,
   children?: { id: string; file: File }[],
   identity?: SessionIdentity,
+  wal?: File,
 ): Promise<void> {
   let lastPost = 0;
   const onProgress = (bytes: number) => {
@@ -226,7 +263,7 @@ async function parse(
   };
 
   try {
-    const main = await build(fileId, file, options, part, onProgress, identity);
+    const main = await build(fileId, file, options, part, onProgress, identity, wal);
     let session = main.session;
     let sources: EventSource[] = main.builder.sources;
 
@@ -266,9 +303,10 @@ async function analyze(
   options: MetricOptions,
   children?: { id: string; file: File }[],
   identity?: SessionIdentity,
+  wal?: File,
 ): Promise<void> {
   try {
-    const parsed = await build(id, file, options, undefined, undefined, identity);
+    const parsed = await build(id, file, options, undefined, undefined, identity, wal);
     let session = parsed.session;
     if (children?.length) {
       const threads = [];

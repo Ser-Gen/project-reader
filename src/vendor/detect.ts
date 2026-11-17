@@ -21,7 +21,6 @@ export interface Detection {
 
 export const SNIFF_BYTES = 64 * 1024;
 const SQLITE_MAGIC = 'SQLite format 3\0';
-
 const CLAUDE_TYPES = new Set([
   'user',
   'assistant',
@@ -44,10 +43,19 @@ const KIMI_TYPES = new Set([
   'usage.record',
 ]);
 
+/**
+ * A SQLite head is Cursor's or ZCode's; the difference is in the schema, which
+ * shows up as `CREATE TABLE …` strings well inside the first pages. ZCode's
+ * relational tables name themselves; Cursor's key/value tables are what is left.
+ */
+function sqliteFromText(text: string): Detection {
+  const zcode = text.includes('CREATE TABLE message') || text.includes('CREATE TABLE model_usage');
+  if (zcode) return { vendor: 'zcode', confidence: 0.9, reason: 'ZCode session database' };
+  return { vendor: 'cursor', confidence: 0.9, reason: 'SQLite database (state.vscdb)' };
+}
+
 export function detectFromText(head: string): Detection {
-  if (head.startsWith(SQLITE_MAGIC)) {
-    return { vendor: 'cursor', confidence: 0.9, reason: 'SQLite database' };
-  }
+  if (head.startsWith(SQLITE_MAGIC)) return sqliteFromText(head);
 
   const lines = head.split('\n').slice(0, 40).filter((l) => l.trim());
   let claude = 0;
@@ -105,7 +113,8 @@ export async function detectFile(file: Blob): Promise<Detection> {
     let magic = '';
     for (let i = 0; i < 16; i++) magic += String.fromCharCode(bytes[i]);
     if (magic === SQLITE_MAGIC) {
-      return { vendor: 'cursor', confidence: 0.9, reason: 'SQLite database (state.vscdb)' };
+      const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+      return sqliteFromText(text);
     }
   }
   // Decoding a 64 KB slice can split a multi-byte character at the tail; the

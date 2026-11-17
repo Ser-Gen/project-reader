@@ -100,6 +100,14 @@ const DB_EXT = /\.(vscdb|sqlite|db)$/i;
 /** Files that cannot be a transcript, skipped before they cost a sniff. */
 const SKIP = /(^|\/)(\.git|node_modules|\.DS_Store)(\/|$)|\.(png|jpe?g|gif|webp|zip|gz|mp4|wasm|map|lock)$/i;
 
+/**
+ * The write-ahead log beside a SQLite database. Not a transcript and never
+ * listed as one, but its size is what tells the reader how fresh the database
+ * it is about to read is not — a ZCode `db.sqlite` without its `-wal` is
+ * missing its own recent history.
+ */
+const WAL_SIDECAR = /(?:^|\/)([^/]+\.(?:sqlite|db|vscdb))-wal$/i;
+
 export function isCandidate(path: string, size: number): boolean {
   if (SKIP.test(path)) return false;
   if (!size) return false;
@@ -128,6 +136,8 @@ export class Registry {
   readonly entries = new Map<string, FileEntry>();
   /** thread id -> the runtime's own note about what that thread was asked to do */
   private readonly sidecars = new Map<string, File>();
+  /** `db.sqlite` -> its `-wal` sidecar, so a database is read with its gap known */
+  private readonly walSidecars = new Map<string, File>();
   private readonly kimiStates = new Map<string, { file: File; path: string }>();
   private readonly metadataKeys = new Map<string, string>();
   private seq = 0;
@@ -136,6 +146,13 @@ export class Registry {
     const rel = path || file.name;
     if (KIMI_STATE.test(rel)) {
       this.kimiStates.set(rel.slice(0, rel.length - 'state.json'.length), { file, path: rel });
+      return null;
+    }
+    const wal = WAL_SIDECAR.exec(rel);
+    if (wal) {
+      // Keyed by the file name it belongs beside, not the full path: the
+      // database itself may have been dropped or picked alone.
+      this.walSidecars.set(wal[1], file);
       return null;
     }
     if (!isCandidate(rel, file.size)) return null;
@@ -169,6 +186,11 @@ export class Registry {
 
   get(id: string): FileEntry | undefined {
     return this.entries.get(id);
+  }
+
+  /** The `-wal` sidecar beside this database, when the folder walk saw one. */
+  walOf(entry: FileEntry): File | undefined {
+    return this.walSidecars.get(entry.name);
   }
 
   /** Kimi keeps the title, project and session id beside the wire, not inside it. */

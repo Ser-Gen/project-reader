@@ -9,6 +9,7 @@ import { ClaudeAdapter, toolBody, fullBody, categoryOf, subgroupOf } from '../sr
 import { renderRow } from '../src/view/rows.ts';
 import { CodexAdapter, fullBody as codexFullBody, scriptCommands } from '../src/vendor/codex.ts';
 import { CursorAdapter, parseExportedChat, readCursorDb } from '../src/vendor/cursor.ts';
+import { ZcodeAdapter, readZcodeDb } from '../src/vendor/zcode.ts';
 import { SqliteDb } from '../src/vendor/sqlite.ts';
 import { detectFromText } from '../src/vendor/detect.ts';
 import { decodeAsk } from '../src/view/ask.ts';
@@ -977,4 +978,141 @@ test('a vendor that records its own title keeps it', () => {
     rec({ type: 'ai-title', aiTitle: 'Refactor the parser' }),
   ]);
   assert.equal(session.info.title, 'Refactor the parser');
+});
+
+/* ---------- zcode ---------- */
+
+/** Build a small ZCode-style db.sqlite with the sqlite3 CLI and read it back. */
+function zcodeFixture() {
+  let dir;
+  try {
+    execFileSync('sqlite3', ['--version'], { stdio: 'ignore' });
+  } catch {
+    return { skipped: true };
+  }
+  dir = mkdtempSync(join(tmpdir(), 'pr-zcode-'));
+  const dbPath = join(dir, 'db.sqlite');
+  const J = (v) => `'${JSON.stringify(v).replace(/'/g, "''")}'`;
+  const sql = `
+    CREATE TABLE session (id text primary key, project_id text not null, workspace_id text, parent_id text,
+      slug text not null, directory text not null, path text, title text not null, version text not null,
+      share_url text, summary_additions integer, summary_deletions integer, summary_files integer,
+      summary_diffs text, revert text, permission text, time_created integer not null,
+      time_updated integer not null, time_compacting integer, time_archived integer,
+      task_type text not null default 'interactive', title_source text not null default 'first_input',
+      title_message_id text, time_title_updated integer, trace_id text, time_deleted integer, last_outcome text);
+    CREATE TABLE message (id text primary key, session_id text not null, time_created integer not null,
+      time_updated integer not null, data text not null, sequence integer);
+    CREATE TABLE part (id text primary key, message_id text not null, session_id text not null,
+      time_created integer not null, time_updated integer not null, data text not null, sequence integer);
+    CREATE TABLE model_usage (id text primary key, logical_request_id text not null, attempt_index integer not null default 0,
+      session_id text not null, turn_id text, trace_id text, span_id text, assistant_message_id text,
+      parent_user_message_id text, query_source text not null, provider_id text not null, model_id text not null,
+      variant text, agent text, mode text, task_type text, status text not null, started_at integer not null,
+      first_token_at integer, completed_at integer, duration_ms integer, time_to_first_token_ms integer,
+      finish_reason text, tool_call_count integer not null default 0, input_tokens integer not null default 0,
+      output_tokens integer not null default 0, reasoning_tokens integer not null default 0,
+      cache_creation_input_tokens integer not null default 0, cache_read_input_tokens integer not null default 0,
+      provider_total_tokens integer, computed_total_tokens integer not null default 0, retry_count integer not null default 0);
+    INSERT INTO session VALUES ('s-main', 'p1', null, null, 's-main', '/work/demo', null, 'Add the feature', '0.17.1',
+      null, null, null, null, null, null, null, 1000, 9000, null, null, 'interactive', 'first_input', null, null, null, null, null);
+    INSERT INTO session VALUES ('s-sub', 'p1', null, 's-main', 's-sub', '/work/demo', null, 'Explore', '0.17.1',
+      null, null, null, null, null, null, null, 1200, 2000, null, null, 'subagent_child', 'default', null, null, null, null, null);
+    INSERT INTO message VALUES ('m1', 's-main', 1000, 1000, ${J({ role: 'user', semantics: { kind: 'user_prompt' }, time: { created: 1000 }, contextSnapshot: { envInfo: { cwd: '/work/demo' } } })}, 0);
+    INSERT INTO part VALUES ('p1', 'm1', 's-main', 1000, 1000, ${J({ type: 'text', text: 'add a login page' })}, 0);
+    INSERT INTO message VALUES ('m2', 's-main', 1100, 1200, ${J({ role: 'assistant', semantics: { kind: 'assistant_response' }, time: { created: 1100, completed: 1200 }, modelSelection: { providerId: 'pv', modelId: 'glm-5.3' } })}, 1);
+    INSERT INTO part VALUES ('p2', 'm2', 's-main', 1100, 1100, ${J({ type: 'reasoning', text: 'think about it' })}, 0);
+    INSERT INTO part VALUES ('p3', 'm2', 's-main', 1110, 1110, ${J({ type: 'text', text: 'On it.' })}, 0);
+    INSERT INTO part VALUES ('p4', 'm2', 's-main', 1120, 1150, ${J({ type: 'tool', callID: 'c1', tool: 'Bash', state: { status: 'completed', input: { command: 'npm test' }, output: 'all good', time: { start: 1120, end: 1150 } } })}, 0);
+    INSERT INTO part VALUES ('p5', 'm2', 's-main', 1200, 1200, ${J({ type: 'step-finish', reason: 'tool-calls', tokens: { total: 120, input: 100, output: 20, reasoning: 0, cache: { read: 80, write: 5 } } })}, 0);
+    INSERT INTO message VALUES ('m3', 's-main', 1300, 1300, ${J({ role: 'assistant', semantics: { kind: 'assistant_response' }, time: { created: 1300 } })}, 2);
+    INSERT INTO part VALUES ('p6', 'm3', 's-main', 1300, 1340, ${J({ type: 'tool', callID: 'c2', tool: 'Agent', state: { status: 'completed', input: { description: 'explore repo' }, output: '[Subagent hand-back] final report of agent_84ef02f0-f05c-4c9f-b0b1-c3e9e25196d7', time: { start: 1300, end: 1340 } } })}, 0);
+    INSERT INTO part VALUES ('p7', 'm3', 's-main', 1350, 1350, ${J({ type: 'step-finish', reason: 'stop', tokens: { total: 50, input: 40, output: 10, reasoning: 0, cache: { read: 0, write: 0 } } })}, 0);
+    INSERT INTO model_usage VALUES ('u1', 'r1', 0, 's-main', null, null, null, 'm2', 'm1', 'agent', 'pv', 'glm-5.3',
+      null, null, null, null, 'completed', 1100, 1105, 1200, 95, 100, 'stop', 1, 999, 111, 11, 5, 77, 205, 205, 0);
+    INSERT INTO model_usage VALUES ('u1b', 'r1', 1, 's-main', null, null, null, 'm2', 'm1', 'agent', 'pv', 'glm-5.3',
+      null, null, null, null, 'error', 1090, null, null, null, null, null, 0, 500, 0, 0, 0, 0, 500, 0, 1);
+  `;
+  execFileSync('sqlite3', [dbPath], { input: sql });
+  return { skipped: false, dir, bytes: new Uint8Array(readFileSync(dbPath)) };
+}
+
+test('a zcode database becomes a session with reported usage', () => {
+  const fx = zcodeFixture();
+  if (fx.skipped) return;
+  try {
+    const { sessions } = readZcodeDb(fx.bytes);
+    assert.equal(sessions.length, 2);
+    const main = sessions.find((s) => s.id === 's-main');
+    assert.equal(main.title, 'Add the feature');
+
+    const adapter = new ZcodeAdapter('f', 'db.sqlite', fx.bytes.length, 0.9, {});
+    const session = adapter.build(main, [], [], 1);
+    assert.equal(session.info.vendor, 'zcode');
+    assert.equal(session.info.cwd, '/work/demo');
+    assert.equal(session.info.model, 'glm-5.3');
+    // human prompt, reasoning, assistant text, Bash op, Agent op — no events
+    // for the runtime-written messages (there are none in this fixture, but
+    // the kinds are what matter).
+    assert.deepEqual(
+      session.events.map((e) => e.kind),
+      ['prompt', 'reasoning', 'text', 'op', 'op'],
+    );
+    const bash = session.events.find((e) => e.op?.name === 'Bash');
+    assert.equal(bash.op.status, 'ok');
+    assert.equal(bash.op.command, 'npm test');
+    assert.equal(bash.durationMs, 30);
+    // the runtime wrote the call's own start/end; that is a reported figure
+    assert.equal(bash.durationSource, 'reported');
+    // the Agent call anchors the thread it started
+    const agent = session.events.find((e) => e.op?.name === 'Agent');
+    assert.equal(agent.op.spawnedThread, 'sess_subagent_agent_84ef02f0-f05c-4c9f-b0b1-c3e9e25196d7');
+    // step-finish tokens are the reported bill, not the retried model_usage row
+    const first = session.events[1];
+    assert.deepEqual(first.tokens.reported, { input: 100, cacheWrite: 5, cacheRead: 80, output: 20, reasoning: undefined });
+    assert.equal(first.tokens.estimated, false);
+  } finally {
+    if (fx.dir) rmSync(fx.dir, { recursive: true, force: true });
+  }
+});
+
+test('a zcode subagent session says what it serves', () => {
+  const fx = zcodeFixture();
+  if (fx.skipped) return;
+  try {
+    const { sessions } = readZcodeDb(fx.bytes);
+    const sub = sessions.find((s) => s.id === 's-sub');
+    const adapter = new ZcodeAdapter('c', 'db.sqlite', fx.bytes.length, 0.9, {});
+    const session = adapter.build(sub, [], [], 1);
+    assert.equal(session.info.thread.role, 'subagent');
+    assert.equal(session.info.thread.parentId, 's-main');
+    assert.equal(session.info.sessionId, 's-sub');
+  } finally {
+    if (fx.dir) rmSync(fx.dir, { recursive: true, force: true });
+  }
+});
+
+test('the wal sidecar is reported, not replayed', () => {
+  const fx = zcodeFixture();
+  if (fx.skipped) return;
+  try {
+    const { sessions, notes } = readZcodeDb(fx.bytes, 2 * 1024 * 1024);
+    assert.ok(notes.some((n) => /write-ahead log was not replayed/.test(n)));
+    assert.equal(sessions.length, 2);
+  } finally {
+    if (fx.dir) rmSync(fx.dir, { recursive: true, force: true });
+  }
+});
+
+test('a zcode sqlite head is detected as zcode, a cursor one as cursor', () => {
+  const fx = zcodeFixture();
+  if (fx.skipped) return;
+  try {
+    const text = new TextDecoder().decode(fx.bytes.slice(0, 64 * 1024));
+    const det = detectFromText(text);
+    assert.equal(det.vendor, 'zcode');
+    assert.ok(det.confidence >= 0.9);
+  } finally {
+    if (fx.dir) rmSync(fx.dir, { recursive: true, force: true });
+  }
 });

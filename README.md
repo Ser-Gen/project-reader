@@ -1,6 +1,6 @@
 # Project Reader
 
-A browser tool for reading **and analyzing** the sessions you ran with Claude Code, Codex, Cursor or Kimi Code.
+A browser tool for reading **and analyzing** the sessions you ran with Claude Code, Codex, Cursor, Kimi Code or ZCode.
 
 Drop a transcript (or open a whole folder of them) and get the run back as a chronological, readable
 timeline — prompts, replies, commands and their output, diffs, screenshots — plus an analytics dock
@@ -169,6 +169,7 @@ src/
     codex.ts             Codex rollout .jsonl (experimental)
     cursor.ts            Cursor state.vscdb / exported chat (experimental)
     kimi.ts              Kimi Code wire.jsonl, protocol 1.5 (main agent)
+    zcode.ts             ZCode db.sqlite (relational: session/message/part/model_usage)
     sqlite.ts            a read-only SQLite b-tree reader, no dependencies
     builder.ts           body clipping, the worker's body store, quality counters
     text.ts              shared text helpers (command heads, diffs, paths)
@@ -206,7 +207,7 @@ tools/
   scenario.mjs           a small awkward transcript plus the ground truth for every metric
 test/
   parser.test.mjs        line splitting, text helpers, categories, height index, markdown
-  adapters.test.mjs      Claude, Codex and Cursor adapters, SQLite, vendor detection
+  adapters.test.mjs      Claude, Codex, Cursor and ZCode adapters, SQLite, vendor detection
   kimi.test.mjs          Kimi wire events, usage, diffs, questions and state sidecars
   metrics.test.mjs       every metric against the scenario's known answers, plus invariants
   view.test.mjs          panels render, provenance survives, transcript text stays escaped
@@ -317,6 +318,14 @@ test/
   are estimated, its durations are mostly unavailable, and its busy clock does not exist. Its schema
   is undocumented and moves between versions; both adapters are labelled experimental until they have
   been validated against more real samples.
+- **ZCode** keeps every session in one SQLite database (`~/.zcode/cli/db/db.sqlite`) rather than a
+  file per session, so the database is a container: the reader lists the sessions it holds and opens
+  one at a time. Reported usage comes straight from the runtime's `model_usage` table — no estimation,
+  whichever provider the session ran on; a third-party provider is the same schema with a different
+  name in it. Subagent sessions are rows with a parent, and the Agent call that started one anchors
+  its lane. A compaction is written three times in the database and rendered once. The `-wal` sidecar
+  is not replayed: its size is stated in the quality report instead, because a number quietly
+  recovered from a half-written log is not a number the reader wants to stand behind.
 
 ## Not built (deliberately)
 

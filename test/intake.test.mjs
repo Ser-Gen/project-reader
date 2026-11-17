@@ -218,3 +218,17 @@ test('a dependent thread is named after the job it was given', async () => {
   assert.equal(kids[0].entry.identity.thread.role, 'subagent');
   assert.equal(titleOf(kids[0].entry), 'agent-a1.jsonl');
 });
+
+test('a sqlite wal sidecar is not a transcript, but the database knows about it', () => {
+  const reg = new Registry();
+  const wal = new File([new Uint8Array(4096)], 'db.sqlite-wal');
+  assert.equal(reg.add(wal, 'zcode/db.sqlite-wal'), null, 'a -wal file is never listed');
+  assert.equal(reg.add(new File([new Uint8Array(4096)], 'state.vscdb-wal'), 'a/state.vscdb-wal'), null);
+
+  const db = reg.add(new File([new Uint8Array(4096)], 'db.sqlite'), 'zcode/db.sqlite');
+  assert.ok(db, 'the database itself is a transcript');
+  assert.equal(reg.walOf(db)?.name, 'db.sqlite-wal');
+  // picked alone, the database has no wal to speak of
+  const alone = reg.add(new File([new Uint8Array(4096)], 'other.db'), 'other.db');
+  assert.equal(reg.walOf(alone), undefined);
+});

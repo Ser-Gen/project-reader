@@ -321,6 +321,7 @@ async function select(entry: FileEntry, lane?: string): Promise<void> {
       options: optionsFor(entry.key),
       children: registry.childrenOf(entry).map((e) => ({ id: e.id, file: e.file })),
       identity: entry.identity ?? undefined,
+      wal: registry.walOf(entry),
     } as ToWorker);
   } else {
     const at = openOrder.indexOf(entry.id);
@@ -620,6 +621,7 @@ elParts.addEventListener('change', (e) => {
     file: rec.entry.file,
     options: optionsFor(rec.entry.key),
     part: sel.value,
+    wal: registry.walOf(rec.entry),
   } as ToWorker);
 });
 
@@ -722,6 +724,7 @@ async function analyzeEntry(entry: FileEntry): Promise<void> {
     options: optionsFor(entry.key),
     children: registry.childrenOf(entry).map((e) => ({ id: e.id, file: e.file })),
     identity: entry.identity ?? undefined,
+    wal: registry.walOf(entry),
   })) as Extract<FromWorker, { type: 'analyzed' }>;
   entry.analyzing = false;
   if (res.metrics) {

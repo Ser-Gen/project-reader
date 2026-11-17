@@ -12,7 +12,7 @@ Project Reader today is a *reader*: drop a Claude Code `.jsonl` transcript, get 
 richly rendered timeline. That engine stays.
 
 This spec adds the second half of the product: an **analyzer**. It answers, for any agent session —
-Claude Code, Cursor, Codex, or Kimi Code — questions the raw transcript cannot:
+Claude Code, Cursor, Codex, Kimi Code, or ZCode — questions the raw transcript cannot:
 
 1. How many tokens went into each operation, and where did the budget actually go?
 2. Which operations ran, how often, how long did they take, how often did they fail?
@@ -33,7 +33,7 @@ constrain what the tool can ever say.
 | # | Decision | Cost accepted |
 |---|---|---|
 | D1 | **Browser-only.** No Node backend, no Electron. `dist/` stays a static site. | Cursor's SQLite must be read with sql.js WASM in-memory; no file watching; File System Access API is Chromium-only, so other browsers get a re-pick-the-folder experience. |
-| D2 | **Claude Code is the reference format.** Cursor and Codex adapters are written against known layout and shipped as *experimental*. | Cursor/Codex numbers may be incomplete until real samples are available. Unknown fields are surfaced, never silently dropped. |
+| D2 | **Claude Code is the reference format.** Cursor and Codex adapters are written against known layout and shipped as *experimental*. | Cursor/Codex numbers may be incomplete until real samples are available. Unknown fields are surfaced, never silently dropped. ZCode's schema is relational and self-describing; its adapter is not experimental, but it inherits the SQLite reader's limits (no WAL replay). |
 | D3 | **Two token models, always labelled separately:** *context cost* (payload tokens an operation injects) and *billed usage* (vendor-reported per-request usage). They are never added together. | Two numbers to explain instead of one. This is deliberate: any single number here would be a fiction. |
 | D4 | **Reader stays the front door**; analytics live in a collapsible right dock. | Analytics are one click away rather than the landing view. |
 | D5 | **Plan = whichever plan artifact exists**, unified across vendors, with a manual override. | Detection is heuristic; the override exists precisely because it will sometimes be wrong. |
@@ -85,6 +85,7 @@ src/
     codex.ts                 Codex rollout .jsonl adapter        (experimental)
     cursor.ts                Cursor state.vscdb / export adapter (experimental)
     kimi.ts                  Kimi Code wire.jsonl adapter (protocol 1.5, main agent)
+    zcode.ts                 ZCode db.sqlite adapter (relational: session/message/part/model_usage)
     sqlite.ts                lazy sql.js loader + Cursor query layer
   metrics/
     tokens.ts                token accounting, both models, calibration
@@ -119,7 +120,7 @@ Every vendor collapses into this. **Metrics are computed from `CanonEvent[]` onl
 may ever branch on vendor. That rule is what keeps cross-agent comparison honest.
 
 ```ts
-type Vendor = 'claude' | 'codex' | 'cursor' | 'kimi';
+type Vendor = 'claude' | 'codex' | 'cursor' | 'kimi' | 'zcode';
 
 type CanonKind =
   | 'prompt'      // human message
@@ -204,6 +205,7 @@ interface CanonEvent {
 | Codex | JSONL; records shaped `{ timestamp, type: "response_item" \| "event_msg" \| "session_meta", payload }` |
 | Cursor | SQLite (`SQLite format 3\0` magic) containing `ItemTable` / `cursorDiskKV`; **or** an exported chat JSON/Markdown |
 | Kimi Code | JSONL; `metadata.protocol_version`, `context.append_loop_event`, `context.append_message` and `usage.record` with Kimi usage fields |
+| ZCode | SQLite magic whose schema strings name `CREATE TABLE message` / `model_usage` (relational tables, not Cursor's key/value ones) |
 
 Unrecognized files are listed in the intake UI as *unrecognized*, with the sniffed first line shown,
 rather than being silently ignored.
@@ -280,6 +282,38 @@ so no Cursor code costs anything to Claude/Codex users.
 - Current limits: subagent files are not merged, Plan-mode files and approval are not reconstructed,
   and `kimi export` ZIP archives must be unpacked before opening. These gaps are stated here rather
   than filled with guessed lineage or plan data.
+
+### 4.6 ZCode
+
+- There is no per-session file: everything lives in one SQLite database,
+  `~/.zcode/cli/db/db.sqlite`, in relational tables — `session`, `message`, `part`, `model_usage`,
+  `session_entry`. The database is a container (like a Cursor `state.vscdb`): the reader lists the
+  sessions it holds and opens one at a time. Detection distinguishes it from Cursor by the schema
+  strings visible in the sniffed head.
+- `message.data` carries `role`, `semantics.kind` and `contextSnapshot.envInfo` (cwd, git branch).
+  On the user side only `semantics.kind = "user_prompt"` is a human speaking; the rest is
+  runtime-written context (todo reminders, task notifications) and never becomes an event. The
+  message's `sequence` orders the timeline; `part.sequence` is written as 0 for almost every row, so
+  parts order by their own `time_created`.
+- A `part` is one block: `text`, `reasoning`, `tool`, `step-finish`, `timeline`, `compaction`. A
+  tool part carries its whole state — input, output, status, and its own `time.start/end` — so the
+  call and its result are one event with a reported duration. `state.metadata.display` holds the
+  renderable form when the runtime kept one (`structuredPatch` for edits, line counts for reads).
+- Usage arrives twice: `step-finish.tokens` is scoped to exactly its message and wins;
+  `model_usage` rows are the fallback, and retry rows (`attempt_index > 0`) are never counted.
+  Reported usage needs no estimation whichever provider the session ran on — the provider is a
+  column, not a format, so a third-party provider is the same schema with a different name in it.
+- A compaction is written three times (a `compaction` part on the last user message, a
+  `compaction` + `timeline` pair on the assistant message that performed it, and a
+  `compact_summary` user message holding the summary prose). One boundary is rendered per
+  `operationId`, with the summary attached; the other copies are dropped, not counted.
+- Subagents are rows: a `session` with `parent_id` is a thread, whose own id *is* its own (unlike
+  a Claude subagent transcript, which records the parent's). The Agent call that started one names
+  the agent id only in its hand-back text; `sess_subagent_agent_<id>` is what `OpFacts.spawnedThread`
+  anchors the lane to. Merging uses the same `vendor/merge.ts` path as a Codex guardian review.
+- Known gap, surfaced not hidden: the `-wal` sidecar is not replayed. The intake routes it to the
+  adapter (`Registry.walOf`), and its size becomes a quality note — the most recent operations may
+  be missing, and the reader says so rather than recovering numbers from a half-written log.
 
 ---
 

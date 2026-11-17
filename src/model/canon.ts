@@ -1,12 +1,12 @@
 /**
  * The vendor-neutral event model.
  *
- * Every adapter (Claude, Codex, Cursor, Kimi) produces exactly this shape, and every
+ * Every adapter (Claude, Codex, Cursor, Kimi, ZCode) produces exactly this shape, and every
  * metric is computed from it. No metric code may branch on vendor — that rule is
  * what makes cross-agent comparison mean anything.
  */
 
-export type Vendor = 'claude' | 'codex' | 'cursor' | 'kimi';
+export type Vendor = 'claude' | 'codex' | 'cursor' | 'kimi' | 'zcode';
 
 export type CanonKind =
   | 'prompt' // human message — these are what the sidebar lists

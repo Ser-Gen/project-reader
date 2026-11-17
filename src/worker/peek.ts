@@ -13,8 +13,9 @@
  * head and runs the *real* adapter over it, keeping nothing but `info`. No
  * second implementation of naming to drift out of step with the first.
  *
- * A Cursor database is the exception: it has no head — reading a chat's title
- * means walking the whole file — so those keep their file name until opened.
+ * A database is the exception: it has no head — reading a chat's title or a
+ * session's name means walking the whole file — so those keep their file name
+ * until opened.
  */
 
 import type { SessionInfo } from '../model/canon.js';
@@ -29,7 +30,9 @@ import { streamLines } from './jsonl.js';
 export const PEEK_BYTES = 256 * 1024;
 
 export async function peekIdentity(file: File, det: Detection): Promise<SessionIdentity> {
-  if (det.vendor === 'unknown' || det.vendor === 'cursor') return { complete: false };
+  // A database has no head: titles live in rows spread over the whole file, so
+  // those keep their file name until opened — Cursor's and ZCode's alike.
+  if (det.vendor === 'unknown' || det.vendor === 'cursor' || det.vendor === 'zcode') return { complete: false };
   const whole = file.size <= PEEK_BYTES;
   const head = whole ? file : file.slice(0, PEEK_BYTES);
   const adapter =

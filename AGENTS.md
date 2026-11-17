@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Browser tool that reads **and analyzes** agent session transcripts (Claude Code, Codex, Cursor, Kimi Code):
+Browser tool that reads **and analyzes** agent session transcripts (Claude Code, Codex, Cursor, Kimi Code, ZCode):
 a chronological timeline plus an analytics dock — tokens, operation time, plan history, A/B compare.
 Vite + TypeScript, **zero runtime dependencies**, entirely client-side. Design: [SPEC.md](SPEC.md).
 
@@ -17,7 +17,7 @@ npm run inspect example.jsonl   # aggregates from a transcript, never its conten
 ## Structure
 
 ```
-src/vendor/    adapters: detect → claude | codex | cursor | kimi (+ own read-only sqlite.ts)
+src/vendor/    adapters: detect → claude | codex | cursor | kimi | zcode (+ own read-only sqlite.ts)
 src/model/     canon.ts (vendor-neutral events), metrics.ts (output contract), protocol.ts
 src/metrics/   canon events → SessionMetrics: tokens, time, ops, plan, phases, improve, estimate
 src/worker/    owns the File: streaming JSONL by byte offset, images → blob URLs
@@ -73,6 +73,21 @@ destroys it.
   is a fallback, not another request); `session` totals are ignored. `state.json` is a metadata
   sidecar, never a transcript: it supplies title/cwd/id and belongs in the cache key. Protocol 1.5
   currently supports the main agent; subagent merging and Plan-mode file reconstruction are not done.
+- **ZCode has no transcripts — only a database, and it writes everything three times.** Sessions live
+  in `~/.zcode/cli/db/db.sqlite` (`session`/`message`/`part`/`model_usage`, one row per block), so the
+  file is a container like a Cursor `state.vscdb`: the reader opens one session at a time and offers
+  the rest as parts. `part.sequence` is 0 for almost every row — the part's own clock orders blocks,
+  the message's `sequence` orders the timeline; sorting by the wrong one scrambles every message.
+  A compaction is written on *two* messages plus a `timeline` copy (`compaction()` renders it once,
+  keyed by `operationId`, with the `compact_summary` prose attached); usage arrives twice too —
+  `step-finish` (scoped to its message) wins, `model_usage` is the fallback, and its retry rows
+  (`attempt_index > 0`) are never counted or the request is billed twice. On the user side only
+  `semantics.kind = 'user_prompt'` is a human: the rest is runtime reminders, and a `compact_summary`
+  message renders *nothing* of its own. A subagent is a `session` row with `parent_id` (its own id
+  really is its own, unlike Claude), and the Agent call names it only in its hand-back text —
+  `agent_<uuid>` in the output maps to `sess_subagent_agent_<uuid>` for `OpFacts.spawnedThread`.
+  The `-wal` sidecar is deliberately not replayed: its size goes into a quality note, and the intake
+  (`Registry.walOf`) routes it by file name — a `-wal` file must never be listed as a transcript.
 - **A transcript is not always a session, and both vendors hide it the same way.** Codex marks a
   *guardian review* thread with `session_meta.thread_source` / `source.subagent`; newer Claude Code
   writes a subagent's work to `<session>/subagents/agent-<id>.jsonl`. In both, the recorded session id

@@ -56,6 +56,12 @@ export type ToWorker =
       part?: string;
       children?: { id: string; file: File }[];
       identity?: SessionIdentity;
+      /**
+       * The write-ahead log that sits beside a SQLite database, when the intake
+       * walked the folder and found one. Its size is all the reader uses: the
+       * gap it represents is stated in the quality report, not replayed.
+       */
+      wal?: File;
     }
   | { type: 'expand'; fileId: string; reqId: number; idx: number }
   | { type: 'search'; fileId: string; reqId: number; query: string }
@@ -74,6 +80,7 @@ export type ToWorker =
       options: MetricOptions;
       children?: { id: string; file: File }[];
       identity?: SessionIdentity;
+      wal?: File;
     }
   | { type: 'close'; fileId: string };
 
