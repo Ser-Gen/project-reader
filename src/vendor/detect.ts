@@ -42,6 +42,15 @@ const KIMI_TYPES = new Set([
   'turn.prompt',
   'usage.record',
 ]);
+/**
+ * Qwen shares Claude's envelope (uuid/sessionId, type user/assistant/system), so
+ * the Claude signals fire on it too. What only Qwen writes: `provenance`,
+ * `message.parts`, `usageMetadata`, a `tool_result` record of its own, and
+ * `systemPayload` under a runtime subtype. None of these appear in a Claude
+ * transcript, so they separate the two without touching the Claude signals.
+ */
+const QWEN_SYSTEM_SUBTYPE =
+  /^(session_|ui_telemetry|turn_result|branch_checkpoint|file_history_snapshot|attribution_snapshot|memory_catalog_snapshot)/;
 
 /**
  * A SQLite head is Cursor's or ZCode's; the difference is in the schema, which
@@ -62,6 +71,7 @@ export function detectFromText(head: string): Detection {
   let codex = 0;
   let cursor = 0;
   let kimi = 0;
+  let qwen = 0;
   let parsed = 0;
 
   for (const line of lines) {
@@ -83,6 +93,11 @@ export function detectFromText(head: string): Detection {
     if (rec.type === 'metadata' && rec.protocol_version && rec.created_at) kimi += 2;
     if (rec.type === 'context.append_loop_event' && typeof rec.event?.type === 'string') kimi++;
     if (rec.type === 'usage.record' && rec.usage && 'inputOther' in rec.usage) kimi++;
+    if (rec.provenance && rec.uuid && rec.sessionId) qwen += 2;
+    if (rec.message && Array.isArray(rec.message.parts)) qwen += 2;
+    if (rec.usageMetadata && typeof rec.usageMetadata.promptTokenCount === 'number') qwen += 2;
+    if (rec.type === 'tool_result' && rec.toolCallResult) qwen += 3;
+    if (rec.type === 'system' && rec.systemPayload && typeof rec.subtype === 'string' && QWEN_SYSTEM_SUBTYPE.test(rec.subtype)) qwen += 2;
   }
 
   const sample = lines[0]?.slice(0, 240);
@@ -94,13 +109,14 @@ export function detectFromText(head: string): Detection {
     return { vendor: 'unknown', confidence: 0, reason: 'not JSONL', sample };
   }
 
-  const best = Math.max(claude, codex, cursor, kimi);
+  const best = Math.max(claude, codex, cursor, kimi, qwen);
   if (best === 0) return { vendor: 'unknown', confidence: 0, reason: 'unrecognized JSONL', sample };
-  const total = claude + codex + cursor + kimi;
+  const total = claude + codex + cursor + kimi + qwen;
   const confidence = Math.min(1, (best / total) * Math.min(1, parsed / 5) + 0.15);
   if (best === kimi) return { vendor: 'kimi', confidence, reason: 'kimi code wire records' };
   if (best === codex) return { vendor: 'codex', confidence, reason: 'codex rollout records' };
   if (best === cursor) return { vendor: 'cursor', confidence, reason: 'cursor chat export' };
+  if (best === qwen) return { vendor: 'qwen', confidence, reason: 'qwen code transcript' };
   return { vendor: 'claude', confidence, reason: 'claude code transcript' };
 }
 

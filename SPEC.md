@@ -315,6 +315,42 @@ so no Cursor code costs anything to Claude/Codex users.
   adapter (`Registry.walOf`), and its size becomes a quality note — the most recent operations may
   be missing, and the reader says so rather than recovering numbers from a half-written log.
 
+### 4.7 Qwen Code (main agent)
+
+- Sessions live under `~/.qwen/projects/<project-slug>/chats/<sessionId>.jsonl`. The envelope is
+  Claude-shaped (`uuid`/`parentUuid`/`sessionId`/`timestamp`/`cwd`/`version`/`gitBranch`); the payload
+  is Gemini-shaped: `message.parts[]` with `text`, `thought: true` and `functionCall {id, name, args}`.
+  The Claude sniff signals fire on Qwen too, so detection leans on what only Qwen writes:
+  `provenance`, `message.parts`, `usageMetadata`, a `tool_result` record of its own, and
+  `systemPayload` under a runtime subtype.
+- The human is `provenance = "real_user"`; other user-side records are runtime context and render as
+  notices. Tool results are their own record type: `toolCallResult.callId` pairs with the
+  `functionCall.id`, and `functionResponse.response.output` is what re-entered the context.
+- Each assistant record is one API request. `usageMetadata` maps to billed usage as:
+  `input = promptTokenCount − cachedContentTokenCount` (the prompt count already includes cache
+  reads), `cacheRead = cachedContentTokenCount`, `cacheWrite = 0` (this wire has no cache-write
+  billing), `output = candidatesTokenCount` (includes thoughts), `reasoning = thoughtsTokenCount`.
+  A request whose thoughts were billed but not persisted refuses the calibration sample, as
+  Claude's does.
+- `resultDisplay` types the renderable result: `shell_result` (output, exitCode, signal, notices),
+  `ask_user_question_answers` (answers keyed by question text — the shared `encodeAsk` map form),
+  and edit/write results carrying `fileDiff` plus `diffStat.model_added/removed_lines`. The display
+  is a reconstruction: `payloadOut` is charged at `response.output`, never at the diff or the shell
+  wrapper the reader shows.
+- `enter_plan_mode`/`exit_plan_mode` produce plan-mode artifacts (approval is read from the exit
+  result), and `write_file`/`edit` to a plan file produce file revisions, as in Claude. `tool_call`
+  wraps a deferred tool: category, target and drill-down key come from the inner name.
+- System records are mostly noise (`ui_telemetry` is ~80% of them) and stay hidden. `turn_result` is
+  bookkeeping: its `promptText`/`resultText` duplicate the timeline and are never rendered as events;
+  a non-completed state becomes an error row. Unknown records and subtypes are kept as system events
+  and counted for quality.
+- Sidecars: `chats/<id>.title.json` supplies the display name and is part of the cache identity
+  (like Kimi's `state.json`); `<id>.ledger.jsonl` and `session-transcript-cursor-key` are runtime
+  bookkeeping and are never listed as transcripts. Images arrive as Gemini-style `inlineData` parts.
+- Current limits: subagent threads (`agent`, `create_sub_session`) are not merged and compaction's
+  record shape is unknown — no sample of either has been observed yet. Both gaps are stated here
+  rather than filled with guessed lineage; the main agent reads fully.
+
 ---
 
 ## 5. Token accounting
@@ -1052,6 +1088,10 @@ remain explicitly unimplemented until representative files are available.
   handle is not stored in IndexedDB, so every browser needs the folder re-picked after a reload.
 - **The redaction switch (§9.2).** Export honours `prefs.redactExports` and the report generator
   implements it; there is no UI toggle for it yet.
+- **Qwen subagents and compaction (§4.7).** The main-agent adapter is complete, but no observed
+  transcript shows where `agent`/`create_sub_session` threads are written or what a compaction
+  record looks like; merging and the compaction marker wait for a real sample instead of a guessed
+  shape.
 
 ### 14.3 Budgets missed
 

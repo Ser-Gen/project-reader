@@ -23,6 +23,7 @@ import type { SessionIdentity } from '../model/protocol.js';
 import { ClaudeAdapter } from '../vendor/claude.js';
 import { CodexAdapter } from '../vendor/codex.js';
 import { KimiAdapter } from '../vendor/kimi.js';
+import { QwenAdapter } from '../vendor/qwen.js';
 import type { Detection } from '../vendor/detect.js';
 import { streamLines } from './jsonl.js';
 
@@ -40,7 +41,9 @@ export async function peekIdentity(file: File, det: Detection): Promise<SessionI
       ? new KimiAdapter('peek', file.name, file.size, det.confidence, {})
       : det.vendor === 'codex'
         ? new CodexAdapter('peek', file.name, file.size, det.confidence, {})
-        : new ClaudeAdapter('peek', file.name, file.size, det.confidence, {});
+        : det.vendor === 'qwen'
+          ? new QwenAdapter('peek', file.name, file.size, det.confidence, {})
+          : new ClaudeAdapter('peek', file.name, file.size, det.confidence, {});
 
   for await (const line of streamLines(head)) {
     let rec: unknown;

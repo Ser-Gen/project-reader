@@ -1,6 +1,6 @@
 # Project Reader
 
-A browser tool for reading **and analyzing** the sessions you ran with Claude Code, Codex, Cursor, Kimi Code or ZCode.
+A browser tool for reading **and analyzing** the sessions you ran with Claude Code, Codex, Cursor, Kimi Code, ZCode or Qwen Code.
 
 Drop a transcript (or open a whole folder of them) and get the run back as a chronological, readable
 timeline — prompts, replies, commands and their output, diffs, screenshots — plus an analytics dock
@@ -14,6 +14,7 @@ are ever stored.
 npm install
 npm run dev      # http://localhost:5173, then drop example.jsonl on the page
 npm run build    # static site in dist/
+npm run preview  # serve dist/ at http://localhost:4173 — the way to open the build
 npm test         # adapters, metrics, invariants, panels, real-transcript checks
 ```
 
@@ -170,6 +171,7 @@ src/
     cursor.ts            Cursor state.vscdb / exported chat (experimental)
     kimi.ts              Kimi Code wire.jsonl, protocol 1.5 (main agent)
     zcode.ts             ZCode db.sqlite (relational: session/message/part/model_usage)
+    qwen.ts              Qwen Code chats/*.jsonl (Claude envelope, Gemini parts; main agent)
     sqlite.ts            a read-only SQLite b-tree reader, no dependencies
     builder.ts           body clipping, the worker's body store, quality counters
     text.ts              shared text helpers (command heads, diffs, paths)
@@ -209,6 +211,7 @@ test/
   parser.test.mjs        line splitting, text helpers, categories, height index, markdown
   adapters.test.mjs      Claude, Codex, Cursor and ZCode adapters, SQLite, vendor detection
   kimi.test.mjs          Kimi wire events, usage, diffs, questions and state sidecars
+  qwen.test.mjs          Qwen parts, per-request usage, diffs, questions and title sidecars
   metrics.test.mjs       every metric against the scenario's known answers, plus invariants
   view.test.mjs          panels render, provenance survives, transcript text stays escaped
   example.test.mjs       the real 5.7 MB transcript: invariants and estimator calibration
@@ -326,6 +329,14 @@ test/
   its lane. A compaction is written three times in the database and rendered once. The `-wal` sidecar
   is not replayed: its size is stated in the quality report instead, because a number quietly
   recovered from a half-written log is not a number the reader wants to stand behind.
+- **Qwen Code** sessions live in `~/.qwen/projects/<project-slug>/chats/<id>.jsonl` — a Claude-shaped
+  envelope over Gemini-style `message.parts`. The human is `provenance = "real_user"`; tool results
+  are their own record type, paired by `toolCallResult.callId`. Every assistant record reports one
+  request's usage (`promptTokenCount` includes cache reads, `candidatesTokenCount` includes thoughts),
+  so billed tokens need no estimation. Shell output, edit diffs, questions and plan-mode artifacts are
+  supported; a sibling `<id>.title.json` supplies the session name and is covered by the metrics cache
+  key. Subagent merging and compaction are not implemented yet — their record shapes have not been
+  observed; unknown records are kept as system events instead of guessed at.
 
 ## Not built (deliberately)
 

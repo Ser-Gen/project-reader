@@ -17,6 +17,7 @@ import { ClaudeAdapter, fullBody as claudeBody } from '../vendor/claude.js';
 import { CodexAdapter, fullBody as codexBody } from '../vendor/codex.js';
 import { CursorAdapter, MAX_DB_BYTES, parseExportedChat, readCursorDb } from '../vendor/cursor.js';
 import { KimiAdapter, fullBody as kimiBody } from '../vendor/kimi.js';
+import { QwenAdapter, fullBody as qwenBody } from '../vendor/qwen.js';
 import { ZcodeAdapter, MAX_DB_BYTES as ZCODE_MAX, readZcodeDb, partsOf as zcodeParts } from '../vendor/zcode.js';
 import type { Builder, EventSource } from '../vendor/builder.js';
 import { mergeThreads } from '../vendor/merge.js';
@@ -122,6 +123,7 @@ async function build(
   const adapter =
     det.vendor === 'kimi' ? new KimiAdapter(fileId, file.name, file.size, det.confidence, cal)
     : det.vendor === 'codex' ? new CodexAdapter(fileId, file.name, file.size, det.confidence, cal)
+    : det.vendor === 'qwen' ? new QwenAdapter(fileId, file.name, file.size, det.confidence, cal)
     : det.vendor === 'cursor' ? null
     : new ClaudeAdapter(fileId, file.name, file.size, det.confidence, cal);
 
@@ -142,8 +144,9 @@ async function build(
       continue;
     }
     // Only pay for the async image walk on records that actually carry one.
-    // Claude writes `"type":"base64"`; Codex and Kimi also use data-URL or result-block forms.
-    if (line.text.length > 1024 && line.text.includes('base64')) {
+    // Claude writes `"type":"base64"`; Codex and Kimi also use data-URL or
+    // result-block forms; Qwen buries them in Gemini-style `inlineData` parts.
+    if (line.text.length > 1024 && (line.text.includes('base64') || line.text.includes('inlineData'))) {
       await extractImages(rec);
     }
     adapter.push(rec, line.start, line.end);
@@ -359,7 +362,11 @@ async function expand(fileId: string, reqId: number, idx: number): Promise<void>
   try {
     const text = await readLine(src.file ?? st.file, src.start, src.end);
     const rec = JSON.parse(text);
-    const body = st.vendor === 'kimi' ? kimiBody(rec, src) : st.vendor === 'codex' ? codexBody(rec, src) : claudeBody(rec, src);
+    const body =
+      st.vendor === 'kimi' ? kimiBody(rec, src)
+      : st.vendor === 'codex' ? codexBody(rec, src)
+      : st.vendor === 'qwen' ? qwenBody(rec, src)
+      : claudeBody(rec, src);
     post({ type: 'expanded', fileId, reqId, body });
   } catch {
     post({ type: 'expanded', fileId, reqId, body: '' });

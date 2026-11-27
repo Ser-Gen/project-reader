@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Browser tool that reads **and analyzes** agent session transcripts (Claude Code, Codex, Cursor, Kimi Code, ZCode):
+Browser tool that reads **and analyzes** agent session transcripts (Claude Code, Codex, Cursor, Kimi Code, ZCode, Qwen Code):
 a chronological timeline plus an analytics dock — tokens, operation time, plan history, A/B compare.
 Vite + TypeScript, **zero runtime dependencies**, entirely client-side. Design: [SPEC.md](SPEC.md).
 
@@ -17,7 +17,7 @@ npm run inspect example.jsonl   # aggregates from a transcript, never its conten
 ## Structure
 
 ```
-src/vendor/    adapters: detect → claude | codex | cursor | kimi | zcode (+ own read-only sqlite.ts)
+src/vendor/    adapters: detect → claude | codex | cursor | kimi | zcode | qwen (+ own read-only sqlite.ts)
 src/model/     canon.ts (vendor-neutral events), metrics.ts (output contract), protocol.ts
 src/metrics/   canon events → SessionMetrics: tokens, time, ops, plan, phases, improve, estimate
 src/worker/    owns the File: streaming JSONL by byte offset, images → blob URLs
@@ -88,6 +88,18 @@ destroys it.
   `agent_<uuid>` in the output maps to `sess_subagent_agent_<uuid>` for `OpFacts.spawnedThread`.
   The `-wal` sidecar is deliberately not replayed: its size goes into a quality note, and the intake
   (`Registry.walOf`) routes it by file name — a `-wal` file must never be listed as a transcript.
+- **Qwen wears Claude's envelope over Gemini's payload.** `uuid`/`sessionId` and the types
+  `user|assistant|system` are Claude's, so the Claude sniff signals fire on a Qwen file too;
+  detection leans on what only Qwen writes — `provenance`, `message.parts`, `usageMetadata`, a
+  `tool_result` record of its own, `systemPayload`. The human is `provenance='real_user'`. Each
+  assistant record is one request: `promptTokenCount` already includes `cachedContentTokenCount`
+  (subtract it for fresh input), and `candidatesTokenCount` includes thoughts. Results pair by
+  `toolCallResult.callId`; `functionResponse.response.output` is what the context paid for —
+  `resultDisplay` (shell output, `fileDiff`, ask answers) is the reader's reconstruction and is never
+  charged. `turn_result.promptText/resultText` duplicate the timeline: render the verdict, not the
+  copy. `chats/<id>.title.json` names the session and belongs in the cache key; `<id>.ledger.jsonl`
+  and `session-transcript-cursor-key` are never listed as transcripts. Subagent merging and
+  compaction are not done — their record shapes have not been seen yet.
 - **A transcript is not always a session, and both vendors hide it the same way.** Codex marks a
   *guardian review* thread with `session_meta.thread_source` / `source.subagent`; newer Claude Code
   writes a subagent's work to `<session>/subagents/agent-<id>.jsonl`. In both, the recorded session id

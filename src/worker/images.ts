@@ -50,7 +50,8 @@ const DATA_URL = /^data:([^;,]+)?(;base64)?,(.*)$/s;
  *
  * The *decoding* is shared; the *walking* is not, because each vendor buries
  * its images somewhere else. Claude nests them inside tool-result blocks;
- * Codex puts them straight in a message's content as data: URLs.
+ * Codex puts them straight in a message's content as data: URLs; Qwen uses
+ * Gemini-style `inlineData` parts.
  */
 export async function extractImages(rec: any): Promise<number> {
   if (rec?.type === 'context.append_message' && Array.isArray(rec?.message?.content)) {
@@ -59,12 +60,28 @@ export async function extractImages(rec: any): Promise<number> {
   if (rec?.type === 'context.append_loop_event' && Array.isArray(rec?.event?.result?.output)) {
     return fromKimi(rec.event.result.output);
   }
+  if (Array.isArray(rec?.message?.parts)) return fromQwen(rec.message.parts);
   const claude = rec?.message?.content;
   if (Array.isArray(claude)) return fromClaude(claude);
   const payload = rec?.payload;
   if (Array.isArray(payload?.content)) return fromCodex(payload.content);
   if (Array.isArray(payload?.output)) return fromCodex(payload.output);
   return 0;
+}
+
+async function fromQwen(parts: any[]): Promise<number> {
+  let n = 0;
+  for (const part of parts) {
+    const d = part?.inlineData;
+    if (!d || typeof d.data !== 'string' || !d.data) continue;
+    const ref = await toRef(d.data, d.mimeType);
+    d.data = ''; // release the big string right away
+    if (ref) {
+      part.__img = ref;
+      n++;
+    }
+  }
+  return n;
 }
 
 async function fromKimi(content: any[]): Promise<number> {

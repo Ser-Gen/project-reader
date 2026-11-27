@@ -170,6 +170,7 @@ async function addFiles(picked: PickedFile[]): Promise<void> {
     if (entry && entry.vendor === null) fresh.push(entry);
   }
   await registry.hydrateKimiMetadata();
+  await registry.hydrateQwenMetadata();
   if (!fresh.length) {
     if (!registry.entries.size) toast('Nothing in there looked like a transcript.');
     return;

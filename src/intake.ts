@@ -95,6 +95,16 @@ const SIDECAR = /(?:^|\/)agent-([A-Za-z0-9_-]+)\.meta\.json$/i;
 const KIMI_STATE = /(?:^|\/)state\.json$/i;
 const KIMI_WIRE = /(?:^|\/)agents\/main\/wire\.jsonl$/i;
 
+/**
+ * Qwen writes its session state beside the transcript in `chats/`: the display
+ * name in `<id>.title.json`, prompt bookkeeping in `<id>.ledger.jsonl`, and an
+ * opaque resume key one level up. None of the three is a transcript; the title
+ * is the only one worth reading, and it names the sidebar row before any parse.
+ */
+const QWEN_TITLE = /(?:^|\/)chats\/[^/]+\.title\.json$/i;
+const QWEN_LEDGER = /(?:^|\/)chats\/[^/]+\.ledger\.jsonl$/i;
+const QWEN_CURSOR_KEY = /(?:^|\/)session-transcript-cursor-key$/i;
+
 const TEXT_EXT = /\.(jsonl|json|log|md|txt)$/i;
 const DB_EXT = /\.(vscdb|sqlite|db)$/i;
 /** Files that cannot be a transcript, skipped before they cost a sniff. */
@@ -139,6 +149,8 @@ export class Registry {
   /** `db.sqlite` -> its `-wal` sidecar, so a database is read with its gap known */
   private readonly walSidecars = new Map<string, File>();
   private readonly kimiStates = new Map<string, { file: File; path: string }>();
+  /** transcript path without `.jsonl` -> the `<id>.title.json` beside it */
+  private readonly qwenTitles = new Map<string, { file: File; path: string }>();
   private readonly metadataKeys = new Map<string, string>();
   private seq = 0;
 
@@ -155,6 +167,11 @@ export class Registry {
       this.walSidecars.set(wal[1], file);
       return null;
     }
+    if (QWEN_TITLE.test(rel)) {
+      this.qwenTitles.set(rel.slice(0, rel.length - '.title.json'.length), { file, path: rel });
+      return null;
+    }
+    if (QWEN_LEDGER.test(rel) || QWEN_CURSOR_KEY.test(rel)) return null;
     if (!isCandidate(rel, file.size)) return null;
     const sidecar = SIDECAR.exec(rel);
     if (sidecar) {
@@ -227,6 +244,38 @@ export class Registry {
           if (identity.cwd) entry.project = identity.cwd;
         } catch {
           /* a wire without a readable sidecar is still a session */
+        }
+      }),
+    );
+  }
+
+  /** Qwen keeps the session's display name beside the transcript, not inside it. */
+  async hydrateQwenMetadata(): Promise<void> {
+    await Promise.all(
+      [...this.entries.values()].map(async (entry) => {
+        if (!entry.path.endsWith('.jsonl')) return;
+        const prefix = entry.path.slice(0, entry.path.length - '.jsonl'.length);
+        const title = this.qwenTitles.get(prefix);
+        if (!title) return;
+        try {
+          const raw = JSON.parse(await title.file.text());
+          const name =
+            typeof raw?.displayName === 'string' && raw.displayName.trim() ? raw.displayName : undefined;
+          if (!name) return;
+          entry.identity = {
+            title: name,
+            cwd: entry.identity?.cwd,
+            sessionId: entry.identity?.sessionId,
+            thread: entry.identity?.thread,
+            startTs: entry.identity?.startTs,
+            model: entry.identity?.model,
+            complete: entry.identity?.complete ?? false,
+          };
+          // The sidecar is part of what this session *is*: a renamed session
+          // must not be served under the old name from the cache.
+          this.metadataKeys.set(entry.id, cacheKey(title.path, title.file.size, title.file.lastModified));
+        } catch {
+          /* a transcript without a readable sidecar is still a session */
         }
       }),
     );
